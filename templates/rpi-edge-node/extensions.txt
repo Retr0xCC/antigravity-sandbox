@@ -1,0 +1,6 @@
+# VS Code extensions for Ansible, YAML, Go, TOML, and Jinja2 templates
+redhat.ansible
+redhat.vscode-yaml
+golang.go
+tamasfe.even-better-toml
+samuelcolvin.jinjahtml

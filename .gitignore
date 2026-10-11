@@ -1,0 +1,17 @@
+# OS & IDE artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker build caches
+.docker/
+
+# Temp files
+*.tmp
+*.log
+
+# Dev Container Antigravity Sandbox (Isolated)
+.devcontainer/
