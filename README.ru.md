@@ -189,7 +189,7 @@ agy-sandbox diagnose
    ```text
    Dev Containers: Reopen in Container
    ```
-3. VS Code соберет образ из `Dockerfile`, смонтирует каталог проекта и откроет встроенный терминал.
+3. VS Code соберет образ из `Dockerfile`, смонтирует каталог проекта и выполнит инициализацию контейнера через `setup.sh` (`postCreateCommand`), в ходе которой автоматически загружаются зависимости и применяется патчер `eligibility-antigravity-patcher`.
 4. Безопасно запускайте Antigravity CLI внутри контейнера:
    ```bash
    agy
@@ -200,7 +200,7 @@ agy-sandbox diagnose
 ## ⚡ Автоматический хук инициализации и производительность
 
 Хук инициализации песочницы (`setup.sh`) является полностью **идемпотентным**:
-1. При первом создании контейнера (`postCreateCommand`) он настраивает права на персистентный том и применяет патч доступности CLI.
+1. При первом создании контейнера (`postCreateCommand`) он настраивает права на персистентный том и автоматически применяет первичный патч CLI с помощью [QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher).
 2. Он блокирует права на бинарник `agy` только на чтение/выполнение (`chmod 555`), защищая от перезаписи или нежелательного автообновления.
 3. Создается файл-маркер `/home/vscode/.agy_initialized`.
 4. Все последующие вызовы `agy` выполняются **мгновенно** без повторного обхода диска или переустановки пакетов.
@@ -239,7 +239,7 @@ antigravity-sandbox/
 ├── base/
 │   ├── devcontainer.json         # Базовая спецификация devcontainer
 │   ├── Dockerfile                # Базовый универсальный образ
-│   └── setup.sh                  # Однократный идемпотентный хук настройки
+│   └── setup.sh                  # Однократный идемпотентный хук настройки (применяет eligibility-antigravity-patcher)
 ├── scripts/
 │   ├── ensure-network.sh         # Настройка Netfilter (DOCKER-USER, INPUT) и ip rule
 │   ├── teardown-network.sh       # Очистка сети, фаервола и маршрутизации
@@ -264,6 +264,16 @@ antigravity-sandbox/
 
 ---
 
-## 📄 Лицензия
+## 🤝 Благодарности и сторонние компоненты (Credits & Third-Party Notice)
 
-Распространяется под лицензией [GNU General Public License v3.0](LICENSE) (GPLv3).
+Во время инициализации контейнера (`setup.sh`) проект автоматически загружает и применяет сторонний скрипт патчера:
+- **[QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher)** (автор: [QNIX-Dev](https://github.com/QNIX-Dev)):
+  - **Роль:** обеспечивает первичный патчинг CLI Antigravity внутри контейнера для корректной работы окружения песочницы.
+  - **Лицензия:** распространяется под лицензией [MIT License](https://github.com/QNIX-Dev/eligibility-antigravity-patcher/blob/main/LICENSE) и остаётся интеллектуальной собственностью его автора.
+
+---
+
+## 📄 Лицензирование (Licensing Clarification)
+
+- **Проект `antigravity-sandbox`:** сам проект (скрипты изоляции, интерактивный TUI, конфигурации шаблонов и сетевые правила) распространяется под лицензией [GNU General Public License v3.0](LICENSE) (GNU GPLv3).
+- **Сторонние компоненты:** сторонний компонент [eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher) от QNIX-Dev распространяется под лицензией **MIT License** и остаётся интеллектуальной собственностью его автора.
