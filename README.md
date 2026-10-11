@@ -189,7 +189,7 @@ agy-sandbox diagnose
    ```text
    Dev Containers: Reopen in Container
    ```
-3. VS Code builds the image locally from `Dockerfile`, mounts your project, and launches an integrated terminal.
+3. VS Code builds the image locally from `Dockerfile`, mounts your project, and executes `setup.sh` (`postCreateCommand`), which automatically installs dependencies and applies the `eligibility-antigravity-patcher`.
 4. Run Antigravity CLI safely inside the container:
    ```bash
    agy
@@ -200,7 +200,7 @@ agy-sandbox diagnose
 ## ⚡ Automated Setup Hook & Performance
 
 The sandbox setup hook (`setup.sh`) is fully **idempotent**:
-1. During the first container creation (`postCreateCommand`), it sets up volume permissions and applies the CLI eligibility patch.
+1. During the first container creation (`postCreateCommand`), it sets up volume permissions and automatically applies the initial CLI patch using [QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher).
 2. It locks `agy` executable permissions to read/execute only (`chmod 555`) to prevent accidental overwrites or auto-updates.
 3. It creates `/home/vscode/.agy_initialized`.
 4. Subsequent invocations of `agy` execute **instantly** without disk traversal or re-running package installations.
@@ -239,7 +239,7 @@ antigravity-sandbox/
 ├── base/
 │   ├── devcontainer.json         # Foundational devcontainer specification
 │   ├── Dockerfile                # Minimal universal base image definition
-│   └── setup.sh                  # One-time idempotent setup hook
+│   └── setup.sh                  # One-time idempotent setup hook (applies eligibility-antigravity-patcher)
 ├── scripts/
 │   ├── ensure-network.sh         # Netfilter (DOCKER-USER & INPUT) & ip rule provisioner
 │   ├── teardown-network.sh       # Clean network, firewall, and routing teardown
@@ -264,8 +264,18 @@ antigravity-sandbox/
 
 ---
 
-## 📄 License
+## 🤝 Credits & Third-Party Components
 
-Distributed under the [GNU General Public License v3.0](LICENSE) (GPLv3).
+During container initialization (`setup.sh`), this project automatically fetches and runs:
+- **[QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher)** by [QNIX-Dev](https://github.com/QNIX-Dev):
+  - **Role:** Performs primary patching of the Antigravity CLI inside the container to ensure the environment functions correctly within the sandbox.
+  - **License:** Released under the [MIT License](https://github.com/QNIX-Dev/eligibility-antigravity-patcher/blob/main/LICENSE) and remains the intellectual property of its author.
+
+---
+
+## 📄 License & Legal Notice
+
+- **`antigravity-sandbox`:** The sandbox infrastructure (isolation scripts, interactive TUI, network boundaries, and container templates) is distributed under the [GNU General Public License v3.0](LICENSE) (GNU GPLv3).
+- **Third-Party Components:** The third-party component [QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher) by QNIX-Dev is distributed under the **MIT License** and remains the intellectual property of its respective author.
 
 
