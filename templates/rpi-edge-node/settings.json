@@ -1,0 +1,14 @@
+{
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "ansible.validation.lint.enabled": true,
+  "ansible.ansible.path": "ansible",
+  "ansible.ansibleLint.path": "ansible-lint",
+  "yaml.validate": true,
+  "yaml.customTags": [
+    "!vault"
+  ],
+  "yaml.schemas": {
+    "https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/ansible.json": "ansible/**/*.yml"
+  },
+  "go.toolsManagement.autoUpdate": false
+}

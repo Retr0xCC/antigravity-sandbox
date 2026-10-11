@@ -1,0 +1,30 @@
+{
+  "name": "${localWorkspaceFolderBasename} (@@TEMPLATE_NAME@@ Sandbox)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+  "mounts": [
+    "source=agy-gemini-data,target=/home/vscode/.gemini,type=volume"
+  ],
+  "runArgs": [
+    "--network=agy_net",
+    "--dns=9.9.9.9",
+    "--sysctl=net.ipv6.conf.all.disable_ipv6=1",
+    "--sysctl=net.ipv6.conf.default.disable_ipv6=1"
+  ],
+  "remoteEnv": {
+    "AGY_CLI_DISABLE_AUTO_UPDATE": "true"
+  },
+  "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/setup.sh",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": []
+    }
+  }
+}

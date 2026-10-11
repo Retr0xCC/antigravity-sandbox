@@ -1,0 +1,5 @@
+# System packages required for Ansible, Go, and remote edge node operations
+openssh-client
+golang-go
+python3-pip
+python3-cryptography
