@@ -1,0 +1,6 @@
+# VS Code extensions for Python, Jupyter notebooks, and PDF documentation
+ms-python.python
+ms-toolsai.jupyter
+ms-toolsai.jupyter-renderers
+ms-toolsai.vscode-jupyter-cell-tags
+tomoki1207.pdf
