@@ -1,34 +1,35 @@
-[English](README.md) | **Русский**
+[English](README.en.md) | **Русский**
 
-# Antigravity Sandbox 🛡️
+# Antigravity Sandbox
 
-> Безопасная, изолированная среда Dev Container для Google DeepMind Antigravity и ИИ кодинг-агентов.
+> Изолированное окружение для Antigravity на базе VS Code Dev Containers
 
-[![CI Docker Publish](https://github.com/Retr0defeated/antigravity-sandbox/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Retr0defeated/antigravity-sandbox/actions/workflows/docker-publish.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Dev Container](https://img.shields.io/badge/Dev%20Containers-Supported-blue.svg)](https://containers.dev/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 ---
 
-## 💡 Обзор
+## Обзор
 
-Автономные ИИ-агенты для написания кода (такие как **Antigravity CLI**, Claude Code, Aider) оперируют мощными системными инструментами: выполняют произвольные команды в терминале (`bash`, `run_command`), модифицируют файлы и обращаются к сети. Запуск таких агентов напрямую на рабочей станции разработчика сопряжен с серьезными угрозами:
+При работе **Antigravity** выполняет shell-команды, изменяет файлы и обращается к сети. Запуск напрямую создает риски для хоста из-за ошибок модели или галлюцинаций.
 
-1. **Радиус поражения хоста (Host Blast Radius):** Ошибочные команды, галлюцинации модели или атаки через prompt injection способны скомпрометировать персональные файлы (`~/.ssh`, `~/.aws`, `~/.kube`, `/etc/`).
-2. **Уязвимость локальной сети (Local Network Exposure):** Работая в сетевом стеке хоста, агент может непреднамеренно просканировать или получить доступ к ресурсам домашней/корпоративной сети (LAN), IoT-устройствам, сетевым хранилищам или панелям управления.
-3. **Засорение системы и конфликт зависимостей:** Установка глобальных пакетов, конфликтующие версии библиотек Python/Node и временные файлы загрязняют операционную систему.
+**Antigravity Sandbox** изолирует агента внутри Docker-контейнера через спецификацию Dev Containers, решая три ключевые задачи:
 
-**Antigravity Sandbox** решает эту проблему, предоставляя изолированную и защищенную среду **Dev Container**, строго следующую [спецификации Development Containers](https://containers.dev/). Все действия агента замыкаются внутри контролируемого контейнера с жестким сетевым периметром, а контекст диалогов и токены авторизации безопасно сохраняются в изолированных томах.
+* **Изоляция файловой системы:** агент ограничен рабочей директорией проекта внутри контейнера и не имеет доступа к файлам хоста (`~/.ssh`, токенам, переменным окружения и системным каталогам).
+* **Блокировка доступа к локальной сети (LAN):** стандартный Docker bridge не изолирует локальную сеть хоста. В проекте сетевой периметр защищен на уровне ядра с помощью правил `iptables` и `ip rule` (через systemd-сервис), что исключает сканирование и доступ к локальным ресурсам (роутерам, NAS, другим машинам).
+* **Чистота хост-системы:** все зависимости, пакетные менеджеры и временные файлы остаются внутри контейнера, не засоряя основную ОС.
+
+Состояние сессий, история диалогов и авторизационные токены Antigravity сохраняются в выделенных Docker-томах (volumes), не смешиваясь с файлами пользователя.
 
 ---
 
-## 🔒 Столпы безопасности и архитектура
+## Модель изоляции и архитектура
 
 ```text
  ┌─────────────────────────────────────────────────────────────┐
- │                Хостовая машина разработчика                 │
+ │                           Хост                              │
  │                                                             │
- │   Защищенные ресурсы (НЕДОСТУПНЫ контейнеру):               │
+ │   Защищенные ресурсы (Недоступны контейнеру):               │
  │   - Домашний каталог хоста (~/.ssh, ~/.aws, ~/.gnupg)       │
  │   - Корневая файловая система хоста (/)                     │
  │   - Docker Socket хоста (/var/run/docker.sock)              │
@@ -36,244 +37,231 @@
  │     через Netfilter INPUT DROP на agy0 (разрешен только DNS)│
  └───────────────────────────────┬─────────────────────────────┘
                                  │
-                   Монтируется только проект
+                                 │  Монтируется только проект
                                  │
                                  ▼
  ┌─────────────────────────────────────────────────────────────┐
- │             Antigravity Sandbox (Dev Container)             │
+ │                          Песочница                          │
  │                                                             │
  │   - Непривилегированный пользователь: 'vscode' (UID 1000)   │
- │   - Предустановлено: antigravity-cli, uv, git, сборщики     │
- │   - Без сетевых админ-прав: NO CAP_NET_ADMIN                │
- │   - Автообновление отключено: AGY_CLI_DISABLE_AUTO_UPDATE   │
- │   - Бинарник заблокирован: chmod 555 agy                    │
+ │   - Автопатч бинарника при сборке: QNIX-Dev agy patch       │
+ │   - Сброшены сетевые привилегии: drop CAP_NET_ADMIN         │
+ │   - Автообновление отключено: AGY_CLI_DISABLE_AUTO_UPDATE=1 │
+ │   - Защита бинарника от перезаписи: chmod 555 agy           │
  │   - Изолированное рабочее пространство: /workspaces/<proj>  │
  │   - Персистентный том состояния:                            │
  │       agy-gemini-data ──► /home/vscode/.gemini              │
  └───────────────────────────────┬─────────────────────────────┘
                                  │
-                    Изолированная docker-сеть
+                                 │  Изолированная docker-сеть
                                  │
                                  ▼
  ┌─────────────────────────────────────────────────────────────┐
- │               Мост Docker-сети (agy_net)                    │
+ │                            Сеть                             │
  │                                                             │
  │   - Подсеть: 172.16.151.0/24 (Интерфейс: agy0)              │
- │   - Выделенный апстрим DNS: 9.9.9.9 (Quad9 Secured DNS)     │
+ │   - Выделенный апстрим DNS: 9.9.9.9 (Quad9 DNS)             │
  │   - Предотвращение утечек IPv6: IPv6 отключен               │
- │   - Динамический Netfilter DOCKER-USER DROP в RFC 1918 LAN  │
- │   - Динамический Netfilter INPUT DROP к портам хоста на agy0│
- │   - Динамический Linux Policy Routing: unreachable в LAN    │
- │   - Персистентность через Systemd: agy-sandbox-network      │
+ │   - Netfilter DOCKER-USER DROP в RFC 1918 LAN               │
+ │   - Netfilter INPUT DROP к портам хоста на agy0             │
+ │   - Linux Policy Routing: unreachable в LAN                 │
+ │   - Сохранение правил через Systemd: agy-sandbox-network    │
  └─────────────────────────────────────────────────────────────┘
 ```
 
-### Ключевые рубежи защиты
+### Реализация защиты
 
-- **Защита рубежа хоста (Host Boundary, цепочка INPUT):** Входящие пакеты с интерфейса контейнера `agy0` к слушающим портам хоста (SSH порт 22, базы данных, Ollama порт 11434, демон Docker) сбрасываются в цепочке Netfilter `INPUT` (`-i agy0 -j DROP`). При этом сохраняются необходимые DNS-запросы (порт 53 UDP/TCP) и установленные соединения (ESTABLISHED/RELATED).
-- **Динамическая изоляция локальной сети (LAN):** Исходящий транзитный трафик из подсети контейнера `172.16.151.0/24` в приватные подсети RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) блокируется в цепочке пересылки `DOCKER-USER` и через правила маршрутизации ядра Linux (`ip rule ... unreachable`).
-- **Персистентность правил через Systemd:** Сетевые правила автоматически восстанавливаются при перезагрузке ОС с помощью легковесного сервиса `agy-sandbox-network.service` (`Type=oneshot`, `RemainAfterExit=yes`), вызывающего `ensure-network.sh` на старте и `teardown.sh` при выключении.
-- **Контролируемый DNS (`--dns=9.9.9.9`):** Запросы резолвятся через безопасные серверы Quad9, исключая утечки DNS и попытки обнаружения локальных хостов через NetBIOS/mDNS.
-- **Непривилегированный контейнер:** Контейнер запускается строго без capability `CAP_NET_ADMIN`, предотвращая манипуляции с raw-сокетами, подмену ARP или изменение сетевых таблиц.
-- **Блокировка исполняемого файла CLI:** Права на пропатченный бинарник `agy` зафиксированы только на чтение и выполнение (`chmod 555`), а в окружении зафиксирован флаг `AGY_CLI_DISABLE_AUTO_UPDATE=true`.
-- **Изоляция токенов и истории:** Учетные данные агента и история чатов сохраняются в независимом томе Docker (`agy-gemini-data -> /home/vscode/.gemini`), не попадая в рабочий каталог проекта на хосте.
-- **Строгие границы монтирования:** В контейнер монтируется исключительно целевой каталог репозитория (`${localWorkspaceFolder}` в `/workspaces/<project>`). Доступ к остальной файловой системе хоста полностью закрыт.
+- **Защита сервисов хоста (цепочка INPUT):** Входящий трафик с интерфейса контейнера `agy0` к слушающим портам хоста (SSH, БД, Ollama, сокет демона Docker) сбрасывается правилом Netfilter `INPUT` (`-i agy0 -j DROP`). Разрешены только локальные DNS-запросы (порт 53 UDP/TCP) и установленные соединения (ESTABLISHED/RELATED).
+- **Изоляция локальной сети (RFC 1918):** Транзитный трафик из подсети контейнера `172.16.151.0/24` в приватные диапазоны LAN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) блокируется в цепочке пересылки `DOCKER-USER` и правилом маршрутизации ядра Linux (`ip rule ... unreachable`).
+- **Персистентность правил (systemd):** Сетевая конфигурация и правила фильтрации управляются юнитом `agy-sandbox-network.service` (`Type=oneshot`, `RemainAfterExit=yes`), который вызывает `ensure-network.sh` при старте системы и `teardown-network.sh` при остановке.
+- **Изолированный DNS (`--dns=9.9.9.9`):** Запросы резолвятся напрямую через Quad9 в обход резолвера хоста, что исключает утечки DNS и сканирование локальных хостов через NetBIOS/mDNS.
+- **Сброс сетевых привилегий:** Контейнер запускается без capability `CAP_NET_ADMIN`, что запрещает манипуляции с raw-сокетами, подмену ARP или модификацию внутренних сетевых таблиц.
+- **Защита бинарника от модификации:** Права на пропатченный бинарник `agy` зафиксированы на чтение и выполнение (`chmod 555`), а автообновление заблокировано переменной `AGY_CLI_DISABLE_AUTO_UPDATE=1`.
+- **Изоляция авторизации и истории:** Сессионные токены и история чатов сохраняются в выделенном Docker-томе (`agy-gemini-data -> /home/vscode/.gemini`), не смешиваясь с файлами в репозитории на хосте.
+- **Ограничение монтирования:** В контейнер монтируется исключительно рабочая директория проекта (`${localWorkspaceFolder}` в `/workspaces/<project>`). Доступ к файловой системе хоста за пределами этого каталога закрыт.
 
 ---
 
-## 🚀 Быстрый старт: подключение песочницы к проекту
+## Быстрый старт: подключение к проекту
 
-### Способ 1: Интерактивный TUI или CLI-инициализатор
+### Инициализатор agy-sandbox (TUI / CLI)
 
-Чтобы развернуть Antigravity Sandbox в вашем репозитории:
+Развертывание песочницы в целевом репозитории:
 
 ```bash
-# Клонируйте репозиторий песочницы (один раз)
-git clone https://github.com/Retr0defeated/antigravity-sandbox.git ~/.antigravity-sandbox
+# Клонировать репозиторий песочницы
+git clone https://codeberg.org/Retr0defeated/antigravity-sandbox.git ~/.antigravity-sandbox
 
-# Установите глобальную команду 'agy-sandbox' в ~/.local/bin
+# Установить команду 'agy-sandbox' в ~/.local/bin
 ~/.antigravity-sandbox/scripts/init-sandbox.sh --install-bin
 
-# Запустите удобный интерактивный терминальный интерфейс (TUI)
+# Интерактивный режим (TUI):
 agy-sandbox
 
-# Либо инициализируйте проект напрямую через CLI:
-agy-sandbox /path/to/your/project
-agy-sandbox /path/to/rpi-edge-node rpi-edge-node
+# Либо инициализация напрямую через аргументы:
+agy-sandbox /path/to/project
+agy-sandbox /path/to/project [шаблон]
 ```
 
-#### Параметры и команды CLI:
+#### Параметры CLI
 
 ```text
-Использование: agy-sandbox [ОПЦИИ] [ЦЕЛЕВОЙ_КАТАЛОГ] [ШАБЛОН]
+Использование: agy-sandbox [ОПЦИИ] [КАТАЛОГ_ПРОЕКТА] [ШАБЛОН]
 
-При запуске без аргументов в терминале открывается интерактивный TUI.
+При запуске без аргументов открывается интерактивное меню (TUI).
 
 Опции:
-  -i, --interactive        Запустить интерактивный терминальный интерфейс (TUI)
-  -l, --list               Показать список доступных шаблонов
-  -d, --diagnose, diagnose Запустить аудит и диагностику безопасности сети
-  --service [КОМАНДА]      Управление сервисом systemd (status|enable|disable|install)
-  --install-bin            Создать симлинк agy-sandbox в ~/.local/bin
-  -h, --help               Показать справку
+  -i, --interactive        Интерактивный выбор проекта и шаблона (TUI)
+  -l, --list               Список доступных шаблонов
+  -d, --diagnose           Аудит и диагностика сетевых правил
+  --service [КОМАНДА]      Управление systemd-сервисом (status | enable | disable | install)
+  --install-bin            Установить симлинк agy-sandbox в ~/.local/bin
+  -h, --help               Справка
 ```
 
 Доступные профили шаблонов:
-- `default` (по умолчанию) — Минимальная универсальная песочница с `antigravity-cli`, `uv`, `git` и базовыми утилитами сборки. Быстрая, легковесная, без лишних расширений.
+- `default` (по умолчанию) — Базовое чистое окружение: antigravity-cli, uv, git и стандартный набор утилит сборки.
 - `rpi-edge-node` — Профиль для автоматизации граничных узлов и шлюзов с Ansible (2.15+), `ansible-lint`, `yamllint`, коллекцией `community.general`, Go (1.22+), клиентом OpenSSH и расширениями VS Code (`redhat.ansible`, `golang.go`, `redhat.vscode-yaml`, `even-better-toml`, `samuelcolvin.jinjahtml` для шаблонов Jinja2 `.j2`).
+- `math-labs` — Профиль для математических вычислений и анализа данных с Python, Jupyter (`ms-toolsai.jupyter`), просмотрщиком PDF (`tomoki1207.pdf`), NumPy, SciPy, Matplotlib, SymPy и pandas.
 
 ---
 
-### Способ 2: Демон персистентности Systemd (Host Network Daemon)
+## Настройка сетевой изоляции на хосте
 
-Чтобы сетевые границы ядра (`ip rule`, `DOCKER-USER` и защита хоста `INPUT`) сохранялись после перезагрузки хоста:
+Чтобы правила фильтрации (`nftables`/`iptables`) и маршрутизации (`ip rule`) автоматически поднимались при загрузке ОС, в проект включен systemd-сервис:
 
 ```bash
-# Включить и запустить демон персистентности systemd (вызывает ensure-network.sh при загрузке):
+# Установить и активировать сервис в системе:
+sudo agy-sandbox service install
 sudo agy-sandbox service enable
-# Либо напрямую через systemctl:
-sudo systemctl enable --now agy-sandbox-network.service
 
-# Проверить статус демона:
+# Проверить статус:
 agy-sandbox service status
-sudo systemctl status agy-sandbox-network.service
 
-# Отключить персистентность и очистить правила изоляции:
+# При необходимости отключить правила:
 sudo agy-sandbox service disable
-# Либо напрямую через systemctl:
-sudo systemctl disable --now agy-sandbox-network.service
 ```
 
 ---
 
-### Способ 3: Диагностика безопасности и аудит
+### Проверка сетевой изоляции
 
-Проверка всех 7 уровней изоляции ядра, правил Netfilter и периметра хоста:
+Для верификации правил Netfilter, таблицы маршрутизации и доступности DNS предусмотрен встроенный аудит:
 
 ```bash
 agy-sandbox diagnose
-# Либо запуск отдельного скрипта:
+# Либо прямой запуск скрипта:
 ~/.antigravity-sandbox/scripts/diagnose.sh
 ```
 
 ---
 
-### Способ 4: Ручная настройка
+## Запуск в VS Code
 
-1. Создайте каталог `.devcontainer` в корне вашего проекта:
+1. Откройте директорию проекта в VS Code:
    ```bash
-   mkdir -p .devcontainer
-   ```
-2. Скопируйте файлы из `templates/default/` (или `templates/rpi-edge-node/`):
-   ```bash
-   cp -r ~/.antigravity-sandbox/templates/default/* .devcontainer/
-   ```
-3. Примените правила изоляции сети на хосте:
-   ```bash
-   ~/.antigravity-sandbox/scripts/ensure-network.sh
-   ```
-4. Для удаления правил изоляции выполните:
-   ```bash
-   ~/.antigravity-sandbox/scripts/teardown.sh
+   code /path/to/project
    ```
 
----
-
-## 🛠️ Использование с VS Code и Cursor
-
-1. Откройте проект в VS Code или Cursor:
-   ```bash
-   code /path/to/your/project
-   ```
-2. Нажмите `F1` (или `Ctrl+Shift+P` / `Cmd+Shift+P`) и выберите:
+2. Откройте командную панель (`F1` или `Ctrl+Shift+P`) и выберите:
    ```text
    Dev Containers: Reopen in Container
    ```
-3. VS Code соберет образ из `Dockerfile`, смонтирует каталог проекта и выполнит инициализацию контейнера через `setup.sh` (`postCreateCommand`), в ходе которой автоматически загружаются зависимости и применяется патчер `eligibility-antigravity-patcher`.
-4. Безопасно запускайте Antigravity CLI внутри контейнера:
+
+3. Редактор соберет Docker-образ и выполнит первичную инициализацию (`setup.sh` через `postCreateCommand`): установит зависимости и применит патч для `agy`.
+
+4. Запустите CLI в интегрированном терминале контейнера:
    ```bash
    agy
    ```
 
 ---
 
-## ⚡ Автоматический хук инициализации и производительность
+### Жизненный цикл контейнера (setup.sh)
 
-Хук инициализации песочницы (`setup.sh`) является полностью **идемпотентным**:
-1. При первом создании контейнера (`postCreateCommand`) он настраивает права на персистентный том и автоматически применяет первичный патч CLI с помощью [QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher).
-2. Он блокирует права на бинарник `agy` только на чтение/выполнение (`chmod 555`), защищая от перезаписи или нежелательного автообновления.
-3. Создается файл-маркер `/home/vscode/.agy_initialized`.
-4. Все последующие вызовы `agy` выполняются **мгновенно** без повторного обхода диска или переустановки пакетов.
+Скрипт первичной настройки `setup.sh` выполняется один раз при создании контейнера (`postCreateCommand`):
+* выставляет права на том `/home/vscode/.gemini`;
+* запускает патчер `QNIX-Dev/eligibility-antigravity-patcher`;
+* блокирует запись в бинарник (`chmod 555`);
+* создает маркер `/home/vscode/.agy_initialized`, предотвращая повторное выполнение при перезапусках.
 
 ---
 
-## 🎨 Создание собственных шаблонов
+## Создание собственных шаблонов
 
 `antigravity-sandbox` поддерживает два формата создания шаблонов:
 
 ### 1. Декларативный режим (рекомендуется)
-Вместо дублирования 90% кода `Dockerfile` и `setup.sh`, создайте каталог `templates/<ваш-шаблон>/` только с необходимыми манифестами:
 
-- **`packages.txt`** *(опционально)*: системные пакеты для установки через `apt-get` (по одному на строку, поддерживаются комментарии `#`).
-- **`extensions.txt`** *(опционально)*: ID расширений VS Code для предустановки (например, `golang.go`, `ms-python.python`).
-- **`settings.json`** *(опционально)*: персональные настройки редактора, объединяемые с `customizations.vscode.settings`.
-- **`extra.Dockerfile`** *(опционально)*: дополнительные инструкции сборки образа (например, `uv tool install ...`).
-- **`extra-setup.sh`** *(опционально)*: дополнительные bash-команды, выполняемые при инициализации контейнера.
-- **`description.txt`**: краткое описание шаблона для CLI `--list` и меню TUI.
+Вместо дублирования базовых файлов `Dockerfile` и `setup.sh`, достаточно создать каталог `templates/<имя_шаблона>/` только с необходимыми манифестами:
 
-*Инициализатор песочницы автоматически наследует файлы `base/Dockerfile`, `base/setup.sh` и `base/devcontainer.json`, динамически внедряя ваши пакеты и расширения.*
+- **`packages.txt`** *(опционально)* — системные пакеты для установки через `apt-get` (по одному на строку, поддерживаются комментарии `#`).
+- **`extensions.txt`** *(опционально)* — идентификаторы расширений VS Code (например, `golang.go`, `ms-python.python`).
+- **`settings.json`** *(опционально)* — параметры конфигурации редактора, объединяемые с `customizations.vscode.settings`.
+- **`extra.Dockerfile`** *(опционально)* — дополнительные сборочные инструкции для образа (например, `uv tool install ...`).
+- **`extra-setup.sh`** *(опционально)* — bash-команды, выполняемые при первичной инициализации контейнера.
+- **`description.txt`** *(опционально)* — краткое описание для справки CLI (`--list`) и меню TUI (по умолчанию: `Custom sandbox profile`).
 
-### 2. Режим полного контроля (Full Custom Mode)
-Если вам требуется полный контроль над конфигурацией Dev Container, просто разместите файлы `devcontainer.json` и/или `Dockerfile` внутри `templates/<ваш-шаблон>/`. Мастер распознает их и скопирует все файлы шаблона 1-в-1 без изменений.
+Инициализатор песочницы автоматически наследует базовую конфигурацию (`base/Dockerfile`, `base/setup.sh`, `base/devcontainer.json`), объединяя её с манифестами шаблона.
+
+### 2. Режим полной конфигурации (Full Custom Mode)
+
+Если требуется полностью переопределить среду сборки, поместите собственные файлы `devcontainer.json` и/или `Dockerfile` напрямую в каталог `templates/<имя_шаблона>/`. Инициализатор скопирует их в целевой проект без объединения с базовым слоем.
 
 ---
 
-## 📂 Структура репозитория
+## Структура репозитория
 
 ```text
 antigravity-sandbox/
-├── .devcontainer/                # Собственная конфигурация devcontainer для репозитория (default)
-├── .github/
-│   └── workflows/
-│       └── docker-publish.yml    # Multi-arch CI пайплайн (linux/amd64 и linux/arm64)
+├── .devcontainer/                  # Конфигурация Dev Container для разработки самой песочницы
+├── .github/workflows/
+│   └── docker-publish.yml          # Сборка multi-arch образов (linux/amd64, linux/arm64)
 ├── base/
-│   ├── devcontainer.json         # Базовая спецификация devcontainer
-│   ├── Dockerfile                # Базовый универсальный образ
-│   └── setup.sh                  # Однократный идемпотентный хук настройки (применяет eligibility-antigravity-patcher)
+│   ├── devcontainer.json           # Базовая спецификация Dev Container
+│   ├── Dockerfile                  # Базовый Docker-образ
+│   └── setup.sh                    # Первичная настройка контейнера (патч agy, права на том)
 ├── scripts/
-│   ├── ensure-network.sh         # Настройка Netfilter (DOCKER-USER, INPUT) и ip rule
-│   ├── teardown-network.sh       # Очистка сети, фаервола и маршрутизации
-│   ├── teardown.sh               # Симлинк на teardown-network.sh
-│   ├── service.sh                # Управление сервисом systemd (agy-sandbox-network.service)
-│   ├── diagnose.sh               # Комплексный 7-уровневый аудит безопасности изоляции
-│   └── init-sandbox.sh           # Интерактивный TUI и точка входа CLI (agy-sandbox)
+│   ├── ensure-network.sh           # Создание сети agy_net, правил Netfilter и ip rule
+│   ├── teardown-network.sh         # Удаление сети agy_net и сброс правил фильтрации
+│   ├── service.sh                  # Управление systemd-юнитом (agy-sandbox-network.service)
+│   ├── diagnose.sh                 # Скрипт аудита сетевых правил и изоляции хоста
+│   └── init-sandbox.sh             # Точка входа CLI (agy-sandbox) и TUI-меню
 ├── templates/
-│   ├── default/                  # Минимальная универсальная песочница (100% наследование из base)
-│   │   └── description.txt       # Описание шаблона
-│   └── rpi-edge-node/            # Декларативный профиль для граничной автоматизации
-│       ├── packages.txt          # Дополнительные apt-пакеты (openssh-client, golang-go и др.)
-│       ├── extensions.txt        # Расширения VS Code (ansible, go, yaml, jinja)
-│       ├── extra.Dockerfile      # Дополнительные шаги сборки (ansible-core через uv)
-│       ├── settings.json         # Персональные настройки VS Code
-│       └── description.txt       # Описание шаблона
+│   ├── default/                    # Базовый профиль (наследует конфигурацию base/)
+│   │   └── description.txt
+│   ├── math-labs/                  # Профиль для математических вычислений и анализа данных
+│   │   ├── packages.txt            # Системные пакеты (python3, graphviz)
+│   │   ├── extensions.txt          # Расширения VS Code (Jupyter, Python, PDF viewer)
+│   │   ├── extra.Dockerfile        # Установка Python-библиотек (numpy, scipy, matplotlib)
+│   │   ├── settings.json           # Конфигурация VS Code
+│   │   └── description.txt
+│   └── rpi-edge-node/              # Профиль для автоматизации граничных узлов и шлюзов
+│       ├── packages.txt            # Системные пакеты (openssh-client, golang)
+│       ├── extensions.txt          # Расширения VS Code (Ansible, Go, YAML, Jinja)
+│       ├── extra.Dockerfile        # Установка ansible-core и ansible-lint
+│       ├── settings.json           # Конфигурация VS Code
+│       └── description.txt
 ├── .gitignore
-├── LICENSE                       # Лицензия GNU General Public License v3.0
-├── README.md                     # Документация на английском языке
-└── README.ru.md                  # Документация на русском языке
+├── LICENSE                         # GNU General Public License v3.0
+├── README.en.md                    # Документация на английском языке
+├── README.md                       # Симлинк на README.en.md (для главной страницы)
+└── README.ru.md                    # Документация на русском языке
 ```
 
 ---
 
-## 🤝 Благодарности и сторонние компоненты (Credits & Third-Party Notice)
+## Сторонние компоненты
 
-Во время инициализации контейнера (`setup.sh`) проект автоматически загружает и применяет сторонний скрипт патчера:
-- **[QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher)** (автор: [QNIX-Dev](https://github.com/QNIX-Dev)):
-  - **Роль:** обеспечивает первичный патчинг CLI Antigravity внутри контейнера для корректной работы окружения песочницы.
-  - **Лицензия:** распространяется под лицензией [MIT License](https://github.com/QNIX-Dev/eligibility-antigravity-patcher/blob/main/LICENSE) и остаётся интеллектуальной собственностью его автора.
+При инициализации контейнера (`setup.sh`) используется сторонний скрипт:
+
+* **[QNIX-Dev/eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher)** (автор: [QNIX-Dev](https://github.com/QNIX-Dev))
+  * **Назначение:** патчинг бинарника Antigravity CLI при сборке окружения.
+  * **Лицензия:** MIT License.
 
 ---
 
-## 📄 Лицензирование (Licensing Clarification)
+## Лицензия
 
-- **Проект `antigravity-sandbox`:** сам проект (скрипты изоляции, интерактивный TUI, конфигурации шаблонов и сетевые правила) распространяется под лицензией [GNU General Public License v3.0](LICENSE) (GNU GPLv3).
-- **Сторонние компоненты:** сторонний компонент [eligibility-antigravity-patcher](https://github.com/QNIX-Dev/eligibility-antigravity-patcher) от QNIX-Dev распространяется под лицензией **MIT License** и остаётся интеллектуальной собственностью его автора.
+- **antigravity-sandbox** (скрипты сетевой изоляции, TUI, шаблоны окружений) — [GNU General Public License v3.0](LICENSE).
+- **eligibility-antigravity-patcher** — [MIT License](https://github.com/QNIX-Dev/eligibility-antigravity-patcher/blob/main/LICENSE).
