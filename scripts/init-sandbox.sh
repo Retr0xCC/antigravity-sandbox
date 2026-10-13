@@ -410,7 +410,7 @@ tui_service_menu() {
     echo -e "  ${CLR_BOLD}[1]${CLR_RESET} Provision / Ensure Network Isolation now (ensure-network.sh)"
     echo -e "  ${CLR_BOLD}[2]${CLR_RESET} Enable & Start Systemd Persistence (systemctl enable --now)"
     echo -e "  ${CLR_BOLD}[3]${CLR_RESET} Disable & Stop Systemd Persistence (systemctl disable --now)"
-    echo -e "  ${CLR_BOLD}[4]${CLR_RESET} Teardown Network Isolation (teardown.sh)"
+    echo -e "  ${CLR_BOLD}[4]${CLR_RESET} Teardown Network Isolation (teardown-network.sh)"
     echo -e "  ${CLR_BOLD}[5]${CLR_RESET} Back to Main Menu"
     echo ""
     local rc=0
@@ -454,7 +454,7 @@ tui_service_menu() {
           continue
         fi
         echo ""
-        "${SCRIPT_DIR}/teardown.sh" || true
+        "${SCRIPT_DIR}/teardown-network.sh" || true
         pause_enter
         ;;
       5|q|Q)
