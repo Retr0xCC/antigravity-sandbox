@@ -1,0 +1,6 @@
+{
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+  "jupyter.askForKernelRestart": false,
+  "notebook.lineNumbers": "on"
+}

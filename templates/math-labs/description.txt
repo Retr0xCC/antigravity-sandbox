@@ -1,0 +1,1 @@
+Mathematics and computational research profile with Python, Jupyter notebooks, SymPy, NumPy, SciPy, Matplotlib, and PDF viewer.
