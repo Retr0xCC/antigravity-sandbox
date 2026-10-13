@@ -88,7 +88,7 @@ else
         if [ -n "${net_id}" ]; then
           ACTIVE_BRIDGE="br-${net_id:0:12}"
           log_info "Network '${NETWORK_NAME}' uses dynamic bridge interface '${ACTIVE_BRIDGE}'."
-          log_info "Tip: To migrate to '${BRIDGE_NAME}', stop running containers, then run: ./scripts/teardown.sh && ./scripts/ensure-network.sh"
+          log_info "Tip: To migrate to '${BRIDGE_NAME}', stop running containers, then run: ./scripts/teardown-network.sh && ./scripts/ensure-network.sh"
         fi
       fi
     else

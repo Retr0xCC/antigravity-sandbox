@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 SERVICE_NAME="agy-sandbox-network.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
 ENSURE_SCRIPT="${SCRIPT_DIR}/ensure-network.sh"
-TEARDOWN_SCRIPT="${SCRIPT_DIR}/teardown.sh"
+TEARDOWN_SCRIPT="${SCRIPT_DIR}/teardown-network.sh"
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
