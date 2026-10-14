@@ -26,9 +26,7 @@ CLR_DIM="\033[2m"
 CLR_GREEN="\033[1;32m"
 CLR_RED="\033[1;31m"
 CLR_YELLOW="\033[1;33m"
-CLR_BLUE="\033[1;34m"
 CLR_CYAN="\033[1;36m"
-CLR_WHITE="\033[1;37m"
 
 cleanup_terminal() {
   if [ -t 0 ]; then
@@ -200,6 +198,7 @@ assemble_declarative_template() {
 expand_path() {
   local p="$1"
   # Expand tilde: ~ or ~/path
+  # shellcheck disable=SC2088
   if [[ "$p" == "~" ]] || [[ "$p" == "~/" ]]; then
     p="${HOME}"
   elif [[ "$p" =~ ^~/(.*) ]]; then
@@ -349,8 +348,7 @@ tui_header() {
 pause_enter() {
   echo ""
   local rc=0
-  local dummy=""
-  read -r -p "Press [Enter] to return to the menu..." dummy || rc=$?
+  read -r -p "Press [Enter] to return to the menu..." || rc=$?
   if [ "$rc" -gt 128 ]; then
     return 130
   fi
@@ -489,7 +487,7 @@ tui_init_wizard() {
 
     local rc=0
     local target_input=""
-    read -e -p "Target project directory: " target_input || rc=$?
+    read -er -p "Target project directory: " target_input || rc=$?
     if [ "$rc" -gt 128 ]; then
       echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
       sleep 0.5

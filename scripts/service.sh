@@ -55,7 +55,7 @@ generate_unit_content() {
   cat <<EOF
 [Unit]
 Description=Antigravity Sandbox Network Isolation Daemon
-Documentation=https://github.com/Retr0defeated/antigravity-sandbox
+Documentation=https://codeberg.org/Retr0xCC/antigravity-sandbox
 After=network.target docker.service
 Wants=docker.service
 
