@@ -18,7 +18,6 @@ CLR_BOLD="\033[1m"
 CLR_GREEN="\033[1;32m"
 CLR_RED="\033[1;31m"
 CLR_YELLOW="\033[1;33m"
-CLR_BLUE="\033[1;34m"
 CLR_CYAN="\033[1;36m"
 
 pass_count=0
