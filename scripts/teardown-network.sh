@@ -93,16 +93,24 @@ fi
 # --------------------------------------------------------
 if command -v ip >/dev/null 2>&1; then
   echo "==> Removing Linux Policy Routing (ip rule)..."
+
   delete_ip_rule() {
     local prio="$1"
     local spec="$2"
-    local check_spec="${spec}"
-    if [[ "${spec}" =~ lookup\ 254 ]]; then
-      check_spec="${spec//lookup 254/lookup (254|main)}"
+    local check_spec="${spec//type /}"
+    if [[ "${check_spec}" =~ lookup\ 254 ]]; then
+      check_spec="${check_spec//lookup 254/lookup (254|main)}"
     fi
+    local -a spec_args
+    read -r -a spec_args <<< "${spec}"
     while ip rule show | grep -E "^${prio}:[[:space:]]+from ${DEFAULT_SUBNET}[[:space:]]+${check_spec}" >/dev/null 2>&1; do
-      ${SUDO} ip rule del priority "${prio}" from "${DEFAULT_SUBNET}" ${spec} 2>/dev/null || \
-      ${SUDO} ip rule del priority "${prio}" from "${DEFAULT_SUBNET}" 2>/dev/null || break
+      if [[ "$(id -u)" -eq 0 ]]; then
+        ip rule del priority "${prio}" from "${DEFAULT_SUBNET}" "${spec_args[@]}" 2>/dev/null || break
+      elif command -v sudo >/dev/null 2>&1; then
+        sudo ip rule del priority "${prio}" from "${DEFAULT_SUBNET}" "${spec_args[@]}" 2>/dev/null || break
+      else
+        break
+      fi
     done
   }
 
