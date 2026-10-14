@@ -6,6 +6,8 @@
 
 [![Dev Container](https://img.shields.io/badge/Dev%20Containers-Supported-blue.svg)](https://containers.dev/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Codeberg](https://img.shields.io/badge/Codeberg-Main_Repo-2185D0?logo=codeberg&logoColor=white)](https://codeberg.org/Retr0xCC/antigravity-sandbox)
+[![GitHub](https://img.shields.io/badge/GitHub-Mirror-181717?logo=github&logoColor=white)](https://github.com/Retr0xCC/antigravity-sandbox)
 
 ---
 
@@ -90,7 +92,7 @@ Deploying the sandbox to a target repository:
 
 ```bash
 # Clone the sandbox repository
-git clone https://codeberg.org/Retr0defeated/antigravity-sandbox.git ~/.antigravity-sandbox
+git clone https://codeberg.org/Retr0xCC/antigravity-sandbox.git ~/.antigravity-sandbox
 
 # Install the 'agy-sandbox' command into ~/.local/bin
 ~/.antigravity-sandbox/scripts/init-sandbox.sh --install-bin
