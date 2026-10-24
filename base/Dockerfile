@@ -22,10 +22,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 USER vscode
 ENV HOME=/home/vscode
 ENV PATH="/home/vscode/.antigravity/bin:/home/vscode/.local/bin:${PATH}"
-ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
+
+# Pin specific CLI version
+ARG AGY_VERSION=1.4.6
+ENV AGY_VERSION=${AGY_VERSION}
 
 # Install antigravity-cli for unprivileged user
-RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash
+COPY install-agy.sh /tmp/install-agy.sh
+RUN bash /tmp/install-agy.sh "${AGY_VERSION}" && rm -f /tmp/install-agy.sh
 
 # Create directory for persisted Gemini / Antigravity credentials volume
 RUN mkdir -p /home/vscode/.gemini
@@ -56,8 +60,7 @@ agy() {
 alias antigravity="agy"
 EOF
 
-RUN echo "export AGY_CLI_DISABLE_AUTO_UPDATE=true" >> /home/vscode/.bashrc && \
-    echo "if [ -f ~/.bash_aliases ]; then . ~/.bash_aliases; fi" >> /home/vscode/.bashrc
+RUN echo "if [ -f ~/.bash_aliases ]; then . ~/.bash_aliases; fi" >> /home/vscode/.bashrc
 
 WORKDIR /workspaces
 CMD ["sleep", "infinity"]

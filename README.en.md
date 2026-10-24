@@ -78,7 +78,7 @@ Session state, conversation history, and Antigravity authorization tokens are pe
 - **Rule persistence (systemd):** Network configuration and filtering rules are managed by the `agy-sandbox-network.service` unit (`Type=oneshot`, `RemainAfterExit=yes`), which invokes `ensure-network.sh` on system startup and `teardown-network.sh` on shutdown.
 - **Isolated DNS (`--dns=9.9.9.9`):** Queries resolve directly through Quad9 bypassing the host resolver, preventing DNS leaks and local host scanning via NetBIOS/mDNS.
 - **Dropped network privileges:** The container runs without `CAP_NET_ADMIN` capability, preventing raw socket manipulation, ARP spoofing, or modifying internal network tables.
-- **Binary modification protection:** Permissions on the patched `agy` binary are fixed to read and execute (`chmod 555`), and auto-update is blocked via `AGY_CLI_DISABLE_AUTO_UPDATE=1`.
+- **Binary modification protection:** For pinned CLI versions (`AGY_VERSION != latest`), permissions on the `agy` binary are fixed to read and execute (`chmod 555`), and auto-update is blocked via `AGY_CLI_DISABLE_AUTO_UPDATE=1`. When running with `latest`, standard executable permissions (`chmod 755`) are preserved and self-updates remain active.
 - **Authorization and history isolation:** Session tokens and chat history are saved in a dedicated Docker volume (`agy-gemini-data -> /home/vscode/.gemini`), without mixing with repository files on the host.
 - **Mount restrictions:** Only the project working directory (`${localWorkspaceFolder}` in `/workspaces/<project>`) is mounted into the container. Access to the host filesystem outside this directory is completely closed off.
 
@@ -103,6 +103,7 @@ agy-sandbox
 # Or initialize directly via arguments:
 agy-sandbox /path/to/project
 agy-sandbox /path/to/project [template]
+agy-sandbox /path/to/project [template] -v 1.4.6
 ```
 
 #### CLI Parameters
@@ -113,13 +114,25 @@ Usage: agy-sandbox [OPTIONS] [PROJECT_DIR] [TEMPLATE]
 When run without arguments, opens an interactive menu (TUI).
 
 Options:
-  -i, --interactive        Interactive project and template selection (TUI)
-  -l, --list               List available templates
-  -d, --diagnose           Audit and diagnose network rules
-  --service [COMMAND]      Manage systemd service (status | enable | disable | install)
-  --install-bin            Install agy-sandbox symlink in ~/.local/bin
-  -h, --help               Help
+  -i, --interactive              Interactive project, template, and version selection (TUI)
+  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. 1.4.6, latest)
+  --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)
+  --no-patch, --skip-patch       Disable patch, keep clean official binary
+  -l, --list                     List available templates
+  -d, --diagnose                 Audit and diagnose network rules
+  --service [COMMAND]            Manage systemd service (status | enable | disable | install)
+  --install-bin                  Install agy-sandbox symlink in ~/.local/bin
+  -h, --help                     Help
 ```
+
+#### Antigravity CLI Version Pinning & Binary Patching
+
+By default, sandboxes deploy with a pinned stable CLI version (`1.4.6`), preventing breaking changes from unexpected upstream updates, and apply the `QNIX-Dev` eligibility patch.
+
+* **Single Control Variable:** Setting `AGY_VERSION` controls both the installed release and security lockdown. When pinned (`AGY_VERSION != latest`), the sandbox automatically locks the binary (`chmod 555`) and blocks auto-updates (`AGY_CLI_DISABLE_AUTO_UPDATE=true` in `~/.bashrc`). For `latest`, the binary retains standard permissions (`chmod 755`) and self-updates remain enabled.
+* **Optional Patching:** Pass `--no-patch` (or select `No` in TUI Step 4) to keep the clean, unmodified official binary. Use `--patch` to explicitly enable it.
+* **Persistent Defaults in `base/devcontainer.json`:** To permanently change default versions and patching behavior for all new sandboxes, simply edit `base/devcontainer.json` (`build.args.AGY_VERSION`, `remoteEnv.AGY_VERSION`, and `remoteEnv.AGY_PATCH`). The initializer automatically derives its defaults directly from this file.
+* **Interactive TUI & CLI:** Wizard steps allow choosing between default stable (`1.4.6`), `latest`, custom tags, and toggling the patcher. CLI flags `-v, --agy-version <tag>` and `--no-patch` allow non-interactive specification.
 
 Available template profiles:
 - `default` (default) — Clean base environment: antigravity-cli, uv, git, and a standard set of build tools.
@@ -183,8 +196,8 @@ agy-sandbox diagnose
 
 The initial setup script `setup.sh` runs once during container creation (`postCreateCommand`):
 * sets permissions on the `/home/vscode/.gemini` volume;
-* runs the `QNIX-Dev/eligibility-antigravity-patcher` patcher;
-* locks the binary against modification (`chmod 555`);
+* conditionally runs the `QNIX-Dev/eligibility-antigravity-patcher` patcher (if `AGY_PATCH=true`);
+* conditionally locks the binary against modification (`chmod 555`) when a version is pinned, or preserves `chmod 755` for `latest`;
 * creates the `/home/vscode/.agy_initialized` marker, preventing repeated execution on restarts.
 
 ---
@@ -222,6 +235,7 @@ antigravity-sandbox/
 ├── base/
 │   ├── devcontainer.json           # Base Dev Container specification
 │   ├── Dockerfile                  # Base Docker image
+│   ├── install-agy.sh              # Standalone CLI downloader and version pinner
 │   └── setup.sh                    # Initial container setup (agy patch, volume permissions)
 ├── scripts/
 │   ├── ensure-network.sh           # Creation of agy_net network, Netfilter rules, and ip rule

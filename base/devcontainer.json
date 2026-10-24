@@ -1,7 +1,10 @@
 {
   "name": "${localWorkspaceFolderBasename} (@@TEMPLATE_NAME@@ Sandbox)",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    "args": {
+      "AGY_VERSION": "1.4.6"
+    }
   },
   "remoteUser": "vscode",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
@@ -16,7 +19,8 @@
     "--sysctl=net.ipv6.conf.default.disable_ipv6=1"
   ],
   "remoteEnv": {
-    "AGY_CLI_DISABLE_AUTO_UPDATE": "true"
+    "AGY_VERSION": "1.4.6",
+    "AGY_PATCH": "true"
   },
   "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/setup.sh",
   "customizations": {

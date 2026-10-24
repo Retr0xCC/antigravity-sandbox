@@ -18,6 +18,25 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Antigravity CLI Defaults derived directly from base/devcontainer.json
+BASE_DEVCONTAINER="${ROOT_DIR}/base/devcontainer.json"
+DEFAULT_AGY_VERSION=""
+DEFAULT_AGY_PATCH=""
+if [ -f "${BASE_DEVCONTAINER}" ] && command -v jq >/dev/null 2>&1; then
+  DEFAULT_AGY_VERSION="$(jq -r '.remoteEnv.AGY_VERSION // empty' "${BASE_DEVCONTAINER}" 2>/dev/null || true)"
+  DEFAULT_AGY_PATCH="$(jq -r '.remoteEnv.AGY_PATCH // empty' "${BASE_DEVCONTAINER}" 2>/dev/null || true)"
+fi
+
+validate_version_format() {
+  local ver="$1"
+  if [ "$ver" = "latest" ]; then
+    return 0
+  fi
+  if [[ "$ver" =~ ^[vV]?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+    return 0
+  fi
+  return 1
+}
 
 # ANSI Colors & Formatting
 CLR_RESET="\033[0m"
@@ -134,6 +153,8 @@ assemble_devcontainer_json() {
   local template_name="$2"
   local template_dir="$3"
   local output_file="$4"
+  local agy_version="${5:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
+  local agy_patch="${6:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
 
   local display_name="${template_name}"
   if [ "${template_name}" = "default" ]; then
@@ -163,15 +184,21 @@ assemble_devcontainer_json() {
       settings_json=$(jq ".customizations.vscode.settings" "${base_json}")
     fi
 
+    local jq_filter='.name = $name | .customizations.vscode.extensions = $exts | .customizations.vscode.settings = $settings | .build.args.AGY_VERSION = $ver | .remoteEnv.AGY_VERSION = $ver | .remoteEnv.AGY_PATCH = $patch | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE) | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)'
+
     jq --arg name "\${localWorkspaceFolderBasename} (${display_name} Sandbox)" \
+       --arg ver "${agy_version}" \
+       --arg patch "${agy_patch}" \
        --argjson exts "${exts_json}" \
        --argjson settings "${settings_json}" \
-       '.name = $name | .customizations.vscode.extensions = $exts | .customizations.vscode.settings = $settings' \
+       "${jq_filter}" \
        "${base_json}" > "${output_file}"
   else
     local template_content
     template_content=$(cat "${base_json}")
     template_content="${template_content//@@TEMPLATE_NAME@@/${display_name}}"
+    template_content="${template_content//\"AGY_VERSION\": \"1.4.6\"/\"AGY_VERSION\": \"${agy_version}\"}"
+    template_content="${template_content//\"AGY_PATCH\": \"true\"/\"AGY_PATCH\": \"${agy_patch}\"}"
     echo -e "${template_content}" > "${output_file}"
   fi
 }
@@ -180,6 +207,8 @@ assemble_declarative_template() {
   local template_path="$1"
   local template_name="$2"
   local dest_dir="$3"
+  local agy_version="${4:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
+  local agy_patch="${5:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
 
   # 1. Setup hook
   cp "${ROOT_DIR}/base/setup.sh" "${dest_dir}/setup.sh"
@@ -192,7 +221,11 @@ assemble_declarative_template() {
   assemble_dockerfile "${ROOT_DIR}/base/Dockerfile" "${template_name}" "${template_path}" "${dest_dir}/Dockerfile"
 
   # 3. devcontainer.json
-  assemble_devcontainer_json "${ROOT_DIR}/base/devcontainer.json" "${template_name}" "${template_path}" "${dest_dir}/devcontainer.json"
+  assemble_devcontainer_json "${ROOT_DIR}/base/devcontainer.json" "${template_name}" "${template_path}" "${dest_dir}/devcontainer.json" "${agy_version}" "${agy_patch}"
+
+  # 4. CLI installer
+  cp "${ROOT_DIR}/base/install-agy.sh" "${dest_dir}/install-agy.sh"
+  chmod +x "${dest_dir}/install-agy.sh"
 }
 
 expand_path() {
@@ -245,6 +278,8 @@ do_init_sandbox() {
   local target_dir="${1:-.}"
   local template="${2:-default}"
   local auto_gitignore="${3:-prompt}" # prompt, yes, no
+  local agy_version="${4:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
+  local agy_patch="${5:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
 
   # Expand tilde and relative paths to canonical absolute path
   target_dir="$(expand_path "${target_dir}")"
@@ -265,6 +300,8 @@ do_init_sandbox() {
   local dest_devcontainer="${target_dir}/.devcontainer"
   echo "==> [antigravity-sandbox] Initializing sandbox in '${target_dir}'..."
   echo "==> [antigravity-sandbox] Selected template profile: '${template}'"
+  echo "==> [antigravity-sandbox] Target Antigravity CLI version: '${agy_version}'"
+  echo "==> [antigravity-sandbox] Apply Antigravity CLI patch: '${agy_patch}'"
 
   mkdir -p "${dest_devcontainer}"
 
@@ -275,9 +312,13 @@ do_init_sandbox() {
     if [ ! -f "${dest_devcontainer}/setup.sh" ]; then
       cp "${ROOT_DIR}/base/setup.sh" "${dest_devcontainer}/setup.sh"
     fi
+    if [ ! -f "${dest_devcontainer}/install-agy.sh" ]; then
+      cp "${ROOT_DIR}/base/install-agy.sh" "${dest_devcontainer}/install-agy.sh"
+      chmod +x "${dest_devcontainer}/install-agy.sh"
+    fi
   else
     echo "==> [antigravity-sandbox] Assembling declarative template from base..."
-    assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}"
+    assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}" "${agy_version}" "${agy_patch}"
   fi
 
   if [ -f "${dest_devcontainer}/setup.sh" ]; then
@@ -584,6 +625,91 @@ tui_init_wizard() {
     selected_template="${t_choice}"
   fi
 
+  echo ""
+  echo -e "${CLR_BOLD}Antigravity CLI Version Selection:${CLR_RESET}"
+  echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}default (${DEFAULT_AGY_VERSION})${CLR_RESET} - Pinned stable release (Recommended)"
+  echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}latest${CLR_RESET}          - Always install latest upstream release"
+  echo -e "  ${CLR_BOLD}[3]${CLR_RESET} ${CLR_CYAN}custom${CLR_RESET}          - Specify custom version tag (e.g. 1.4.5, v1.4.7)"
+  echo ""
+
+  local selected_version="${DEFAULT_AGY_VERSION}"
+  while true; do
+    local rc=0
+    local v_choice="1"
+    read -r -p "Select version option [1-3, default: 1]: " v_choice || rc=$?
+    if [ "$rc" -gt 128 ]; then
+      echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
+      sleep 0.5
+      return 130
+    fi
+    v_choice="${v_choice:-1}"
+    case "${v_choice}" in
+      1)
+        selected_version="${DEFAULT_AGY_VERSION}"
+        break
+        ;;
+      2)
+        selected_version="latest"
+        break
+        ;;
+      3)
+        while true; do
+          local rc_custom=0
+          local custom_tag=""
+          read -r -p "Enter version tag (e.g. 1.4.5, v1.4.7) or 'cancel': " custom_tag || rc_custom=$?
+          if [ "$rc_custom" -gt 128 ] || [ "${custom_tag}" = "cancel" ] || [ "${custom_tag}" = "q" ]; then
+            break
+          fi
+          custom_tag="$(echo "${custom_tag}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ -z "${custom_tag}" ]; then
+            continue
+          fi
+          if validate_version_format "${custom_tag}"; then
+            selected_version="${custom_tag}"
+            break 2
+          else
+            echo -e "${CLR_RED}Invalid version format '${custom_tag}'. Expected e.g. '1.4.5' or 'v1.4.7'.${CLR_RESET}"
+          fi
+        done
+        ;;
+      *)
+        echo -e "${CLR_RED}Please choose 1, 2, or 3.${CLR_RESET}"
+        ;;
+    esac
+  done
+
+  echo ""
+  echo -e "${CLR_BOLD}Antigravity CLI Binary Patching (QNIX-Dev patcher):${CLR_RESET}"
+  echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}Yes${CLR_RESET} - Apply patch (Default / Recommended)"
+  echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}No${CLR_RESET}  - Keep clean official binary without modifications"
+  echo ""
+
+  local selected_patch="true"
+  while true; do
+    local rc=0
+    local p_choice="1"
+    read -r -p "Apply patch? [1-2, default: 1]: " p_choice || rc=$?
+    if [ "$rc" -gt 128 ]; then
+      echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
+      sleep 0.5
+      return 130
+    fi
+    p_choice="${p_choice:-1}"
+    case "${p_choice}" in
+      1|[Yy]|[Yy][Ee][Ss])
+        selected_patch="true"
+        break
+        ;;
+      2|[Nn]|[Nn][Oo])
+        selected_patch="false"
+        break
+        ;;
+      *)
+        echo -e "${CLR_RED}Please choose 1 (Yes) or 2 (No).${CLR_RESET}"
+        ;;
+    esac
+  done
+
   local add_git="yes"
   if [ -f "${target_dir}/.gitignore" ]; then
     local rc=0
@@ -600,7 +726,7 @@ tui_init_wizard() {
   fi
 
   echo ""
-  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}"
+  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}"
   pause_enter
 }
 
@@ -669,72 +795,109 @@ run_tui() {
 # ========================================================
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  # Install bin symlink
-  if [ "${1:-}" = "--install-bin" ]; then
-    BIN_DIR="${HOME}/.local/bin"
-    mkdir -p "${BIN_DIR}"
-    ln -sf "${SCRIPT_DIR}/init-sandbox.sh" "${BIN_DIR}/agy-sandbox"
-    echo "==> [antigravity-sandbox] Installed 'agy-sandbox' CLI command into ${BIN_DIR}/agy-sandbox"
-    echo "    Ensure ${BIN_DIR} is in your PATH."
-    exit 0
-  fi
+  CLI_VERSION="${AGY_VERSION:-${DEFAULT_AGY_VERSION}}"
+  CLI_PATCH="${AGY_PATCH:-${DEFAULT_AGY_PATCH}}"
+  TARGET_DIR=""
+  TEMPLATE=""
+  FORCE_INTERACTIVE=false
 
-  # List templates
-  if [ "${1:-}" = "--list" ] || [ "${1:-}" = "-l" ]; then
-    list_templates
-    exit 0
-  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --install-bin)
+        BIN_DIR="${HOME}/.local/bin"
+        mkdir -p "${BIN_DIR}"
+        ln -sf "${SCRIPT_DIR}/init-sandbox.sh" "${BIN_DIR}/agy-sandbox"
+        echo "==> [antigravity-sandbox] Installed 'agy-sandbox' CLI command into ${BIN_DIR}/agy-sandbox"
+        echo "    Ensure ${BIN_DIR} is in your PATH."
+        exit 0
+        ;;
+      --list|-l)
+        list_templates
+        exit 0
+        ;;
+      --diagnose|-d|diagnose)
+        exec "${SCRIPT_DIR}/diagnose.sh"
+        ;;
+      --service|service)
+        shift
+        exec "${SCRIPT_DIR}/service.sh" "$@"
+        ;;
+      --interactive|-i)
+        FORCE_INTERACTIVE=true
+        shift
+        ;;
+      -v|--agy-version|--version)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing version argument for $1${CLR_RESET}" >&2
+          exit 1
+        fi
+        if ! validate_version_format "$2"; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid version format '$2'. Expected 'latest' or SemVer tag (e.g. '1.4.6' or 'v1.4.6').${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_VERSION="$2"
+        shift 2
+        ;;
+      --patch)
+        CLI_PATCH="true"
+        shift
+        ;;
+      --no-patch|--skip-patch)
+        CLI_PATCH="false"
+        shift
+        ;;
+      -h|--help|help)
+        echo "Usage: agy-sandbox [OPTIONS] [TARGET_DIR] [TEMPLATE]"
+        echo ""
+        echo "Without arguments in interactive terminal, launches the Antigravity TUI."
+        echo ""
+        echo "Options:"
+        echo "  -i, --interactive              Launch interactive terminal user interface"
+        echo "  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. '1.4.6', 'latest')"
+        echo "  --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)"
+        echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary"
+        echo "  -l, --list                     List available sandbox templates"
+        echo "  -d, --diagnose, diagnose       Run security audit & boundary diagnostics"
+        echo "  --service [COMMAND]            Manage systemd persistence (status|enable|disable|install)"
+        echo "  --install-bin                  Symlink agy-sandbox into ~/.local/bin"
+        echo "  -h, --help                     Show this help message"
+        echo ""
+        echo "Positional initialization:"
+        echo "  agy-sandbox /path/to/project [template_name] [-v version] [--no-patch]"
+        exit 0
+        ;;
+      *)
+        if [ -z "$TARGET_DIR" ]; then
+          TARGET_DIR="$1"
+        elif [ -z "$TEMPLATE" ]; then
+          TEMPLATE="$1"
+        else
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Unknown argument: $1${CLR_RESET}" >&2
+          exit 1
+        fi
+        shift
+        ;;
+    esac
+  done
 
-  # Run diagnostics
-  if [ "${1:-}" = "--diagnose" ] || [ "${1:-}" = "-d" ] || [ "${1:-}" = "diagnose" ]; then
-    exec "${SCRIPT_DIR}/diagnose.sh"
-  fi
-
-  # Manage service
-  if [ "${1:-}" = "--service" ] || [ "${1:-}" = "service" ]; then
-    shift
-    exec "${SCRIPT_DIR}/service.sh" "$@"
-  fi
-
-  # Force interactive TUI
-  if [ "${1:-}" = "--interactive" ] || [ "${1:-}" = "-i" ]; then
+  if [ "$FORCE_INTERACTIVE" = true ]; then
     run_tui
     exit 0
   fi
 
-  # Help
-  if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
-    echo "Usage: agy-sandbox [OPTIONS] [TARGET_DIR] [TEMPLATE]"
-    echo ""
-    echo "Without arguments in interactive terminal, launches the Antigravity TUI."
-    echo ""
-    echo "Options:"
-    echo "  -i, --interactive        Launch interactive terminal user interface"
-    echo "  -l, --list               List available sandbox templates"
-    echo "  -d, --diagnose, diagnose Run security audit & boundary diagnostics"
-    echo "  --service [COMMAND]      Manage systemd persistence (status|enable|disable|install)"
-    echo "  --install-bin            Symlink agy-sandbox into ~/.local/bin"
-    echo "  -h, --help               Show this help message"
-    echo ""
-    echo "Positional initialization:"
-    echo "  agy-sandbox /path/to/project [template_name]"
-    exit 0
-  fi
-
   # If no arguments provided:
-  if [ "$#" -eq 0 ]; then
+  if [ -z "$TARGET_DIR" ]; then
     if [ -t 0 ] && [ -t 1 ]; then
       run_tui
       exit 0
     else
       # Non-interactive headless fallback when piped or called in CI without args
-      do_init_sandbox "." "default" "no"
+      do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}"
       exit 0
     fi
   fi
 
   # Positional arguments provided: agy-sandbox <target_dir> [template]
-  TARGET_DIR="${1}"
-  TEMPLATE="${2:-default}"
-  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt"
+  TEMPLATE="${TEMPLATE:-default}"
+  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}"
 fi
