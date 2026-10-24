@@ -28,7 +28,7 @@ ARG AGY_VERSION=1.4.6
 ENV AGY_VERSION=${AGY_VERSION}
 
 # Install antigravity-cli for unprivileged user
-COPY install-agy.sh /tmp/install-agy.sh
+COPY --chown=vscode:vscode install-agy.sh /tmp/install-agy.sh
 RUN bash /tmp/install-agy.sh "${AGY_VERSION}" && rm -f /tmp/install-agy.sh
 
 # Create directory for persisted Gemini / Antigravity credentials volume
