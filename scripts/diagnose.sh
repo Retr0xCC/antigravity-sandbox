@@ -4,13 +4,57 @@ set -euo pipefail
 # ========================================================
 # Antigravity Sandbox Security Diagnostics
 # Audits Docker network, Linux Policy Routing (ip rule),
-# Netfilter DOCKER-USER & INPUT host boundary isolation,
-# and Systemd persistence status.
+# Netfilter AGY-SANDBOX-FWD & AGY-SANDBOX-IN isolation,
+# IPv6 boundary, Systemd persistence & hardening, and
+# Container egress boundary isolation.
 # ========================================================
 
-NETWORK_NAME="agy_net"
-DEFAULT_SUBNET="172.16.151.0/24"
-BRIDGE_NAME="agy0"
+# Resolve symlinks to find real script location
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/sandbox.conf"
+fi
+
+NETWORK_NAME="${NETWORK_NAME:-agy_net}"
+DEFAULT_SUBNET="${DEFAULT_SUBNET:-172.16.151.0/24}"
+BRIDGE_NAME="${BRIDGE_NAME:-agy0}"
+READY_FILE="${READY_FILE:-/run/agy-sandbox/network.ready}"
+
+# Fix F4: Initialize ACTIVE_BRIDGE and ACTIVE_SUBNET to prevent unbound variable crash with set -u
+ACTIVE_BRIDGE="${BRIDGE_NAME:-br-agy}"
+ACTIVE_SUBNET="${DEFAULT_SUBNET:-172.16.151.0/24}"
+
+if [ -f "${READY_FILE}" ]; then
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    case "$key" in
+      NETWORK_NAME) [ -n "$val" ] && NETWORK_NAME="$val" ;;
+      ACTIVE_BRIDGE) [ -n "$val" ] && ACTIVE_BRIDGE="$val" ;;
+      ACTIVE_SUBNET) [ -n "$val" ] && ACTIVE_SUBNET="$val" ;;
+    esac
+  done < "${READY_FILE}"
+elif command -v docker >/dev/null 2>&1 && docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
+  subnet_found=$(docker network inspect "${NETWORK_NAME}" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "")
+  if [ -n "${subnet_found}" ] && [ "${subnet_found}" != "<no value>" ]; then
+    ACTIVE_SUBNET="${subnet_found}"
+  fi
+  bridge_opt=$(docker network inspect "${NETWORK_NAME}" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
+  if [ -n "${bridge_opt}" ] && [ "${bridge_opt}" != "<no value>" ]; then
+    ACTIVE_BRIDGE="${bridge_opt}"
+  else
+    net_id=$(docker network inspect "${NETWORK_NAME}" --format '{{.Id}}' 2>/dev/null || echo "")
+    if [ -n "${net_id}" ]; then
+      ACTIVE_BRIDGE="br-${net_id:0:12}"
+    fi
+  fi
+fi
 
 # ANSI Colors
 CLR_RESET="\033[0m"
@@ -48,15 +92,94 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 fi
 
+BLOCKED_RANGES=(
+  "0.0.0.0/8"
+  "10.0.0.0/8"
+  "100.64.0.0/10"
+  "127.0.0.0/8"
+  "169.254.0.0/16"
+  "172.16.0.0/12"
+  "192.0.0.0/24"
+  "192.168.0.0/16"
+  "198.18.0.0/15"
+  "224.0.0.0/4"
+  "240.0.0.0/4"
+  "255.255.255.255/32"
+)
+
 echo -e "${CLR_BOLD}═════════════════════════════════════════════════════════════${CLR_RESET}"
 echo -e "${CLR_CYAN}${CLR_BOLD}       🛡️  ANTIGRAVITY SANDBOX SECURITY AUDITOR 🛡️          ${CLR_RESET}"
 echo -e "${CLR_BOLD}═════════════════════════════════════════════════════════════${CLR_RESET}"
 echo ""
 
+# Container Egress Probe Helper (No CAP_NET_RAW / no ping)
+audit_egress_isolation() {
+  local exec_prefix="$1" # e.g. "" or "docker exec <cid>"
+  local gw_ip="$2"
+
+  echo -e "  Checking egress blocks via TCP sockets and HTTP (CAP_NET_RAW safe)..."
+
+  # 1. Gateway host probe
+  local gw_blocked=true
+  for port in 22 80 2375 53; do
+    if ${exec_prefix} timeout 2 bash -c "</dev/tcp/${gw_ip}/${port}" >/dev/null 2>&1; then
+      log_fail "Host gateway socket ${gw_ip}:${port} is REACHABLE (HOST EXPOSED!)."
+      gw_blocked=false
+    fi
+  done
+  if [ "${gw_blocked}" = "true" ]; then
+    log_pass "Host gateway sockets (${gw_ip}:22/80/2375/53) blocked from container."
+  fi
+
+  # 2. Cloud metadata probe (169.254.169.254)
+  if ${exec_prefix} curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/ >/dev/null 2>&1; then
+    log_fail "Cloud metadata service (169.254.169.254) is REACHABLE!"
+  elif ${exec_prefix} timeout 2 bash -c "</dev/tcp/169.254.169.254/80" >/dev/null 2>&1; then
+    log_fail "Cloud metadata socket (169.254.169.254:80) is REACHABLE!"
+  else
+    log_pass "Cloud metadata service (169.254.169.254) blocked."
+  fi
+
+  # 3. CGNAT / Tailscale probe (100.64.0.1, 100.100.100.100)
+  for cgnat_ip in "100.64.0.1" "100.100.100.100"; do
+    if ${exec_prefix} timeout 2 bash -c "</dev/tcp/${cgnat_ip}/80" >/dev/null 2>&1; then
+      log_fail "CGNAT/Tailscale socket ${cgnat_ip}:80 is REACHABLE!"
+    else
+      log_pass "CGNAT/Tailscale socket ${cgnat_ip}:80 blocked."
+    fi
+  done
+}
+
+# If explicitly requested container mode via CLI flag
+if [ "${1:-}" = "--container" ] || [ "${1:-}" = "container" ] || [ "${1:-}" = "-c" ]; then
+  echo -e "${CLR_BOLD}[In-Container Audit Mode]${CLR_RESET}"
+  gw_ip=$(ip route show default 2>/dev/null | awk '/default/ {print $3}' || echo "")
+  if [ -z "${gw_ip}" ]; then
+    gw_ip=$(echo "${ACTIVE_SUBNET}" | sed -E 's/\.[0-9]+\/[0-9]+$/\.1/')
+  fi
+  audit_egress_isolation "" "${gw_ip}"
+  echo ""
+  echo -e "${CLR_BOLD}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  echo -e "Audit Results:  ${CLR_GREEN}${pass_count} Passed${CLR_RESET}  |  ${CLR_YELLOW}${warn_count} Warnings${CLR_RESET}  |  ${CLR_RED}${fail_count} Failed${CLR_RESET}"
+  if [ "${fail_count}" -eq 0 ]; then
+    echo -e "${CLR_GREEN}${CLR_BOLD}🛡️  VERDICT: CONTAINER IS ISOLATED${CLR_RESET}"
+    exit 0
+  else
+    echo -e "${CLR_RED}${CLR_BOLD}⚠️  VERDICT: CONTAINER LEAK DETECTED${CLR_RESET}"
+    exit 1
+  fi
+fi
+
 # --------------------------------------------------------
-# 1. Docker Daemon & Network Inspection
+# 1. Docker Daemon, Bridge Network & Fail-Closed Marker
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[1/5] Docker Engine & Bridge Network (${NETWORK_NAME})${CLR_RESET}"
+echo -e "${CLR_BOLD}[1/6] Docker Engine, Bridge Network (${NETWORK_NAME}) & Readiness Marker${CLR_RESET}"
+if [ -f "${READY_FILE}" ]; then
+  log_pass "Fail-Closed marker exists at ${READY_FILE} (network ready)."
+else
+  log_fail "Fail-Closed marker ${READY_FILE} is missing. Run ensure-network.sh."
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
   log_fail "Docker CLI not found in PATH."
 else
@@ -66,32 +189,24 @@ else
     log_pass "Docker daemon is responsive."
 
     if docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
-      subnet_found=$(docker network inspect "${NETWORK_NAME}" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || echo "")
-      if [ "${subnet_found}" = "${DEFAULT_SUBNET}" ]; then
-        log_pass "Docker network '${NETWORK_NAME}' configured with subnet ${DEFAULT_SUBNET}."
+      subnet_found=$(docker network inspect "${NETWORK_NAME}" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "")
+      if [ -n "${subnet_found}" ] && [ "${subnet_found}" = "${ACTIVE_SUBNET}" ]; then
+        log_pass "Docker network '${NETWORK_NAME}' configured with subnet ${ACTIVE_SUBNET}."
       else
-        log_warn "Docker network '${NETWORK_NAME}' has unexpected subnet: '${subnet_found}' (expected ${DEFAULT_SUBNET})."
+        log_warn "Docker network '${NETWORK_NAME}' has subnet '${subnet_found}' (expected ${ACTIVE_SUBNET})."
       fi
 
-      ACTIVE_BRIDGE="${BRIDGE_NAME}"
       bridge_opt=$(docker network inspect "${NETWORK_NAME}" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
       if [ -n "${bridge_opt}" ] && [ "${bridge_opt}" != "<no value>" ]; then
-        ACTIVE_BRIDGE="${bridge_opt}"
-        if [ "${bridge_opt}" = "${BRIDGE_NAME}" ]; then
-          log_pass "Docker network bridge interface mapped to '${BRIDGE_NAME}'."
+        if [ "${bridge_opt}" = "${ACTIVE_BRIDGE}" ]; then
+          log_pass "Docker network bridge interface mapped to '${ACTIVE_BRIDGE}'."
         else
           log_info "Docker network bridge interface mapped to '${bridge_opt}'."
         fi
       else
-        net_id=$(docker network inspect "${NETWORK_NAME}" --format '{{.Id}}' 2>/dev/null || echo "")
-        if [ -n "${net_id}" ]; then
-          ACTIVE_BRIDGE="br-${net_id:0:12}"
-          log_info "Network '${NETWORK_NAME}' uses dynamic bridge interface '${ACTIVE_BRIDGE}'."
-          log_info "Tip: To migrate to '${BRIDGE_NAME}', stop running containers, then run: ./scripts/teardown-network.sh && ./scripts/ensure-network.sh"
-        fi
+        log_info "Docker network uses dynamic bridge '${ACTIVE_BRIDGE}'."
       fi
     else
-      ACTIVE_BRIDGE="${BRIDGE_NAME}"
       log_fail "Docker network '${NETWORK_NAME}' does not exist. Run ensure-network.sh."
     fi
   fi
@@ -99,16 +214,16 @@ fi
 echo ""
 
 # --------------------------------------------------------
-# 2. Kernel Interface Check
+# 2. Kernel Bridge Interface
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[2/5] Kernel Bridge Interface (${ACTIVE_BRIDGE})${CLR_RESET}"
+echo -e "${CLR_BOLD}[2/6] Kernel Bridge Interface (${ACTIVE_BRIDGE})${CLR_RESET}"
 if command -v ip >/dev/null 2>&1; then
   if ip link show "${ACTIVE_BRIDGE}" >/dev/null 2>&1; then
     log_pass "Interface '${ACTIVE_BRIDGE}' exists in kernel."
   elif [ "${ACTIVE_BRIDGE}" != "${BRIDGE_NAME}" ] && ip link show "${BRIDGE_NAME}" >/dev/null 2>&1; then
     log_pass "Interface '${BRIDGE_NAME}' exists in kernel."
   else
-    log_warn "Interface '${ACTIVE_BRIDGE}' not found in 'ip link' (created when network or first container starts)."
+    log_fail "Bridge interface '${ACTIVE_BRIDGE}' not found in kernel ('ip link')."
   fi
 else
   log_warn "'ip' command not found."
@@ -118,31 +233,39 @@ echo ""
 # --------------------------------------------------------
 # 3. Linux Kernel Policy Routing (ip rule)
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[3/5] Linux Kernel Policy Routing (ip rule)${CLR_RESET}"
+echo -e "${CLR_BOLD}[3/6] Linux Kernel Policy Routing (ip rule)${CLR_RESET}"
 if command -v ip >/dev/null 2>&1; then
-  rules_dump=$(ip rule show 2>/dev/null || echo "")
-  
-  # Rule 70: local subnet lookup
-  if echo "${rules_dump}" | grep -E "^70:[[:space:]]+from ${DEFAULT_SUBNET}[[:space:]]+to ${DEFAULT_SUBNET}[[:space:]]+lookup (main|254)" >/dev/null 2>&1; then
-    log_pass "Rule prio 70: Intra-subnet traffic routing allowed (to ${DEFAULT_SUBNET})."
+  rules_dump=$(${SUDO} ip rule show 2>/dev/null || ip rule show 2>/dev/null || echo "")
+
+  # Rule pref 95: Intra-subnet lookup main bound to iif
+  # Note: ip rule show prints 'to <dest>' before 'iif <dev>', and /32 is omitted by iproute2 for host bit length
+  snet_pattern="(to ${ACTIVE_SUBNET}|to ${ACTIVE_SUBNET%/32})([[:space:]]|$)"
+  if echo "${rules_dump}" | grep -E "^95:[[:space:]]+" | grep -F "iif ${ACTIVE_BRIDGE}" | grep -E "${snet_pattern}" | grep -E "lookup (main|254)" >/dev/null 2>&1; then
+    log_pass "Rule prio 95: Intra-subnet traffic routing allowed (iif ${ACTIVE_BRIDGE} to ${ACTIVE_SUBNET} lookup main)."
   else
-    log_fail "Rule prio 70: Missing intra-subnet rule (from ${DEFAULT_SUBNET} to ${DEFAULT_SUBNET})."
+    log_fail "Rule prio 95: Missing intra-subnet rule (iif ${ACTIVE_BRIDGE} to ${ACTIVE_SUBNET} lookup main)."
   fi
 
-  # Rule 80: RFC 1918 unreachable
-  for rfc in "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"; do
-    if echo "${rules_dump}" | grep -E "^80:[[:space:]]+from ${DEFAULT_SUBNET}[[:space:]]+to ${rfc}[[:space:]]+unreachable" >/dev/null 2>&1; then
-      log_pass "Rule prio 80: Outbound to private RFC 1918 subnet ${rfc} marked unreachable."
+  # Rules pref 100: Outbound unreachable for blocked ranges
+  local_all_100_ok=true
+  for cidr in "${BLOCKED_RANGES[@]}"; do
+    cidr_pattern="(to ${cidr}|to ${cidr%/32})([[:space:]]|$)"
+    if echo "${rules_dump}" | grep -E "^100:[[:space:]]+" | grep -F "iif ${ACTIVE_BRIDGE}" | grep -E "${cidr_pattern}" | grep -F "unreachable" >/dev/null 2>&1; then
+      :
     else
-      log_fail "Rule prio 80: Missing unreachable rule for ${rfc}."
+      log_fail "Rule prio 100: Missing unreachable rule for ${cidr} on ${ACTIVE_BRIDGE}."
+      local_all_100_ok=false
     fi
   done
+  if [ "${local_all_100_ok}" = "true" ]; then
+    log_pass "Rule prio 100: All 12 private/special ranges marked unreachable for iif ${ACTIVE_BRIDGE}."
+  fi
 
-  # Rule 100: default main table lookup
-  if echo "${rules_dump}" | grep -E "^100:[[:space:]]+from ${DEFAULT_SUBNET}[[:space:]]+lookup (main|254)" >/dev/null 2>&1; then
-    log_pass "Rule prio 100: Main routing table lookup active for external internet."
+  # Check for legacy 'from <subnet>' rules
+  if echo "${rules_dump}" | grep -E "[[:space:]]+from (${ACTIVE_SUBNET}|172\.16\.151\.0\/24)" >/dev/null 2>&1; then
+    log_warn "Legacy 'from <subnet>' rule detected in ip rule (can cause VPN route leaks). Run ensure-network.sh to migrate."
   else
-    log_fail "Rule prio 100: Missing main routing table fallback rule."
+    log_pass "RPDB rules strictly bound to incoming interface 'iif ${ACTIVE_BRIDGE}' (VPN-safe)."
   fi
 else
   log_warn "'ip' command not found."
@@ -150,9 +273,9 @@ fi
 echo ""
 
 # --------------------------------------------------------
-# 4. Netfilter Firewall (DOCKER-USER & INPUT)
+# 4. Netfilter Firewall (DOCKER-USER & INPUT chains)
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[4/5] Netfilter Packet Filtering (iptables)${CLR_RESET}"
+echo -e "${CLR_BOLD}[4/6] Netfilter Packet Filtering (iptables)${CLR_RESET}"
 if command -v iptables >/dev/null 2>&1; then
   if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
     if ! sudo -n true 2>/dev/null; then
@@ -161,66 +284,65 @@ if command -v iptables >/dev/null 2>&1; then
     fi
   fi
 
-  # 4a: DOCKER-USER forwarding boundary
+  # 4a: DOCKER-USER forwarding jump
   if ${SUDO} iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-    for dest in "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12"; do
-      if ${SUDO} iptables -C DOCKER-USER -s "${DEFAULT_SUBNET}" -d "${dest}" -j DROP >/dev/null 2>&1; then
-        log_pass "DOCKER-USER chain: Forwarding DROP rule to ${dest} is active."
-      else
-        log_fail "DOCKER-USER chain: Missing DROP rule to ${dest}."
-      fi
-    done
+    if ${SUDO} iptables -C DOCKER-USER -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD >/dev/null 2>&1; then
+      log_pass "DOCKER-USER chain: Forwarding jump to AGY-SANDBOX-FWD active for ${ACTIVE_BRIDGE}."
+    else
+      log_fail "DOCKER-USER chain: Missing jump to AGY-SANDBOX-FWD for ${ACTIVE_BRIDGE}."
+    fi
   else
     log_warn "DOCKER-USER chain not found in iptables filter table."
   fi
 
-  # 4b: INPUT host boundary isolation
-  if ${SUDO} iptables -L INPUT -n >/dev/null 2>&1; then
-    # Established
-    if ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \
-       ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \
-       ${SUDO} iptables -C INPUT -i "${BRIDGE_NAME}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; then
-      log_pass "INPUT chain: ESTABLISHED/RELATED stateful flows accepted on bridge."
+  # 4b: Dedicated AGY-SANDBOX-FWD chain
+  if ${SUDO} iptables -L AGY-SANDBOX-FWD -n >/dev/null 2>&1; then
+    if ${SUDO} iptables -C AGY-SANDBOX-FWD -d "${ACTIVE_SUBNET}" -j RETURN >/dev/null 2>&1; then
+      log_pass "AGY-SANDBOX-FWD chain: Intra-subnet traffic RETURN rule verified (${ACTIVE_SUBNET})."
     else
-      log_fail "INPUT chain: Missing ESTABLISHED/RELATED rule on bridge."
+      log_fail "AGY-SANDBOX-FWD chain: Missing intra-subnet RETURN rule for ${ACTIVE_SUBNET}."
     fi
 
-    # DNS UDP/TCP
-    if ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -p udp --dport 53 -j ACCEPT >/dev/null 2>&1 || \
-       ${SUDO} iptables -C INPUT -i "${BRIDGE_NAME}" -p udp --dport 53 -j ACCEPT >/dev/null 2>&1; then
-      log_pass "INPUT chain: Host DNS UDP port 53 query accepted on bridge."
-    else
-      log_fail "INPUT chain: Missing DNS UDP port 53 rule on bridge."
-    fi
-
-    if ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -p tcp --dport 53 -j ACCEPT >/dev/null 2>&1 || \
-       ${SUDO} iptables -C INPUT -i "${BRIDGE_NAME}" -p tcp --dport 53 -j ACCEPT >/dev/null 2>&1; then
-      log_pass "INPUT chain: Host DNS TCP port 53 query accepted on bridge."
-    else
-      log_fail "INPUT chain: Missing DNS TCP port 53 rule on bridge."
-    fi
-
-    # Host boundary DROP
-    if ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -j DROP >/dev/null 2>&1 || \
-       ${SUDO} iptables -C INPUT -i "${BRIDGE_NAME}" -j DROP >/dev/null 2>&1; then
-      log_pass "INPUT chain: Host boundary DROP rule active on bridge (unauthorized host ports blocked)."
-    else
-      log_fail "INPUT chain: Missing host boundary DROP rule on bridge (HOST PORTS EXPOSED!)."
-    fi
-
-    # Verify rule order (DROP must come after DNS in INPUT chain)
-    input_rules=$(${SUDO} iptables -S INPUT 2>/dev/null || echo "")
-    drop_line=$(echo "${input_rules}" | grep -n -E -- "-i (${ACTIVE_BRIDGE}|${BRIDGE_NAME}) -j DROP" | head -n1 | cut -d: -f1 || echo "0")
-    dns_line=$(echo "${input_rules}" | grep -n -E -- "-i (${ACTIVE_BRIDGE}|${BRIDGE_NAME}) -p udp --dport 53 -j ACCEPT" | head -n1 | cut -d: -f1 || echo "0")
-    if [ -n "${drop_line}" ] && [ -n "${dns_line}" ] && [ "${drop_line}" -gt 0 ] && [ "${dns_line}" -gt 0 ]; then
-      if [ "${drop_line}" -gt "${dns_line}" ]; then
-        log_pass "INPUT chain: Rule ordering verified (DNS evaluated before DROP)."
-      else
-        log_fail "INPUT chain: Incorrect rule ordering (DROP rule precedes DNS rule!)."
+    local_fwd_drop_ok=true
+    for cidr in "${BLOCKED_RANGES[@]}"; do
+      if ! ${SUDO} iptables -C AGY-SANDBOX-FWD -d "${cidr}" -j DROP >/dev/null 2>&1; then
+        local_fwd_drop_ok=false
+        log_fail "AGY-SANDBOX-FWD chain: Missing DROP rule for ${cidr}."
       fi
+    done
+    if [ "${local_fwd_drop_ok}" = "true" ]; then
+      log_pass "AGY-SANDBOX-FWD chain: DROP rules active for all 12 private/special ranges."
+    fi
+  else
+    log_fail "AGY-SANDBOX-FWD chain does not exist in iptables."
+  fi
+
+  # 4c: INPUT chain jump to AGY-SANDBOX-IN
+  if ${SUDO} iptables -L INPUT -n >/dev/null 2>&1; then
+    if ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-IN >/dev/null 2>&1; then
+      log_pass "INPUT chain: Host boundary jump to AGY-SANDBOX-IN active for ${ACTIVE_BRIDGE}."
+    else
+      log_fail "INPUT chain: Missing jump to AGY-SANDBOX-IN for ${ACTIVE_BRIDGE} (HOST PORTS EXPOSED!)."
     fi
   else
     log_fail "INPUT chain inaccessible in iptables."
+  fi
+
+  # 4d: Dedicated AGY-SANDBOX-IN chain
+  if ${SUDO} iptables -L AGY-SANDBOX-IN -n >/dev/null 2>&1; then
+    if ${SUDO} iptables -C AGY-SANDBOX-IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; then
+      log_pass "AGY-SANDBOX-IN chain: ESTABLISHED/RELATED stateful flows accepted."
+    else
+      log_fail "AGY-SANDBOX-IN chain: Missing ESTABLISHED/RELATED stateful rule."
+    fi
+
+    if ${SUDO} iptables -C AGY-SANDBOX-IN -j DROP >/dev/null 2>&1; then
+      log_pass "AGY-SANDBOX-IN chain: Host boundary DROP rule active (all host services protected from container)."
+    else
+      log_fail "AGY-SANDBOX-IN chain: Missing host boundary DROP rule."
+    fi
+  else
+    log_fail "AGY-SANDBOX-IN chain does not exist in iptables."
   fi
 else
   log_warn "'iptables' command not found."
@@ -228,14 +350,74 @@ fi
 echo ""
 
 # --------------------------------------------------------
-# 5. Systemd Persistence Status
+# 5. IPv6 & Systemd Persistence Status
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[5/5] Systemd Network Daemon Persistence${CLR_RESET}"
+echo -e "${CLR_BOLD}[5/6] IPv6 Boundary & Systemd Persistence${CLR_RESET}"
+
+# IPv6 Sysctl & Rules
+if command -v sysctl >/dev/null 2>&1; then
+  dis_v6=$(sysctl -n "net.ipv6.conf.${ACTIVE_BRIDGE}.disable_ipv6" 2>/dev/null || echo "")
+  if [ "${dis_v6}" = "1" ]; then
+    log_pass "IPv6 disabled on ${ACTIVE_BRIDGE} via sysctl (disable_ipv6=1)."
+  else
+    log_warn "IPv6 disable_ipv6 sysctl on ${ACTIVE_BRIDGE} is '${dis_v6}' (expected 1)."
+  fi
+fi
+
+if command -v ip6tables >/dev/null 2>&1; then
+  v6_ok=true
+  if ! ${SUDO} ip6tables -C FORWARD -i "${ACTIVE_BRIDGE}" -j DROP >/dev/null 2>&1; then
+    log_fail "ip6tables FORWARD: Missing DROP rule for ${ACTIVE_BRIDGE}."
+    v6_ok=false
+  fi
+  if ! ${SUDO} ip6tables -C INPUT -i "${ACTIVE_BRIDGE}" -j DROP >/dev/null 2>&1; then
+    log_fail "ip6tables INPUT: Missing DROP rule for ${ACTIVE_BRIDGE}."
+    v6_ok=false
+  fi
+  if [ "${v6_ok}" = "true" ]; then
+    log_pass "ip6tables: IPv6 traffic from ${ACTIVE_BRIDGE} dropped in FORWARD & INPUT."
+  fi
+else
+  log_info "ip6tables not available on this host."
+fi
+
+# Systemd unit inspection
 UNIT_FILE="/etc/systemd/system/agy-sandbox-network.service"
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   if [ -f "${UNIT_FILE}" ]; then
     log_pass "Systemd unit file exists at ${UNIT_FILE}."
-    
+
+    # Verify LPE Protection: ExecStart must not point to home/root
+    exec_start=$(grep -E "^ExecStart=" "${UNIT_FILE}" | head -n1 | cut -d= -f2- | tr -d ' ' || echo "")
+    if [[ "${exec_start}" =~ ^/usr/local/lib/agy-sandbox/ ]]; then
+      log_pass "Systemd ExecStart points to secure system path: ${exec_start}"
+    else
+      log_fail "Systemd ExecStart points to insecure path: '${exec_start}' (LPE risk!). Expected /usr/local/lib/agy-sandbox/..."
+    fi
+
+    if [[ "${exec_start}" =~ ^/home/ || "${exec_start}" =~ ^/root/ ]]; then
+      log_fail "CRITICAL SECURITY RISK: ExecStart runs script from user directory (${exec_start})!"
+    fi
+
+    # Check ownership of installed binary
+    if [ -f "/usr/local/lib/agy-sandbox/ensure-network.sh" ]; then
+      owner=$(stat -c "%U:%G" "/usr/local/lib/agy-sandbox/ensure-network.sh" 2>/dev/null || echo "unknown")
+      if [ "${owner}" = "root:root" ]; then
+        log_pass "/usr/local/lib/agy-sandbox/ensure-network.sh is owned by root:root."
+      else
+        log_fail "/usr/local/lib/agy-sandbox/ensure-network.sh owned by '${owner}' (must be root:root)."
+      fi
+    fi
+
+    # Check hardening directives
+    for directive in "ProtectHome=yes" "ProtectSystem=full" "PrivateTmp=yes" "RuntimeDirectory=agy-sandbox"; do
+      if grep -q -F "${directive}" "${UNIT_FILE}"; then
+        :
+      else
+        log_warn "Systemd unit missing hardening directive: ${directive}"
+      fi
+    done
+
     if systemctl is-enabled agy-sandbox-network.service >/dev/null 2>&1; then
       log_pass "Service 'agy-sandbox-network.service' is enabled (persists on reboot)."
     else
@@ -252,6 +434,32 @@ if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   fi
 else
   log_info "Host does not run systemd as init (or inside container). Persistence via systemd not applicable."
+fi
+echo ""
+
+# --------------------------------------------------------
+# 6. Container Boundary Verification
+# --------------------------------------------------------
+echo -e "${CLR_BOLD}[6/6] Container Egress Boundary Tests (TCP/HTTP Probes)${CLR_RESET}"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  active_cid=$(docker ps --filter "network=${NETWORK_NAME}" --format '{{.ID}}' 2>/dev/null | head -n1 || echo "")
+  if [ -n "${active_cid}" ]; then
+    c_name=$(docker ps --filter "id=${active_cid}" --format '{{.Names}}' 2>/dev/null || echo "${active_cid:0:12}")
+    log_info "Active container detected on '${NETWORK_NAME}': ${c_name} (${active_cid:0:12})"
+    gw_ip=$(echo "${ACTIVE_SUBNET}" | sed -E 's/\.[0-9]+\/[0-9]+$/\.1/')
+    audit_egress_isolation "docker exec ${active_cid}" "${gw_ip}"
+  else
+    log_info "No active containers running on '${NETWORK_NAME}'. Skipping live container egress probe."
+  fi
+elif [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then
+  log_info "Running in container environment. Performing egress boundary probe..."
+  gw_ip=$(ip route show default 2>/dev/null | awk '/default/ {print $3}' || echo "")
+  if [ -z "${gw_ip}" ]; then
+    gw_ip=$(echo "${ACTIVE_SUBNET}" | sed -E 's/\.[0-9]+\/[0-9]+$/\.1/')
+  fi
+  audit_egress_isolation "" "${gw_ip}"
+else
+  log_info "Docker daemon and container environment not detected. Skipping container egress probe."
 fi
 echo ""
 

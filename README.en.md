@@ -61,22 +61,24 @@ Session state, conversation history, and Antigravity authorization tokens are pe
  ┌─────────────────────────────────────────────────────────────┐
  │                           Network                           │
  │                                                             │
- │   - Subnet: 172.16.151.0/24 (Interface: agy0)               │
- │   - Dedicated upstream DNS: 9.9.9.9 (Quad9 DNS)             │
- │   - IPv6 leak prevention: IPv6 disabled                     │
- │   - Netfilter DOCKER-USER DROP to RFC 1918 LAN              │
- │   - Netfilter INPUT DROP to host ports on agy0              │
- │   - Linux Policy Routing: unreachable to LAN                │
- │   - Rule persistence via Systemd: agy-sandbox-network       │
+ │   - Subnet: Docker IPAM dynamic / custom via sandbox.conf   │
+ │   - Bridge: agy0 (ICC enabled, IPv6 disabled)               │
+ │   - Dedicated upstream DNS: 9.9.9.9, 149.112.112.112 (Quad9)│
+ │   - Fail-Closed protection: /run/agy-sandbox/network.ready  │
+ │   - Netfilter: AGY-SANDBOX-FWD (DROP LAN) & AGY-SANDBOX-IN  │
+ │   - Linux Policy Routing: pref 95 intra / pref 100 unreach  │
+ │   - Hardened Systemd Service: /usr/local/lib/agy-sandbox/   │
  └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Security Implementation
 
-- **Host service protection (INPUT chain):** Inbound traffic from container interface `agy0` to host listening ports (SSH, DB, Ollama, Docker daemon socket) is dropped by the Netfilter `INPUT` rule (`-i agy0 -j DROP`). Only local DNS requests (port 53 UDP/TCP) and established connections (ESTABLISHED/RELATED) are permitted.
-- **Local network isolation (RFC 1918):** Transit traffic from the container subnet `172.16.151.0/24` to private LAN ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) is blocked in the `DOCKER-USER` forwarding chain and by a Linux kernel routing rule (`ip rule ... unreachable`).
-- **Rule persistence (systemd):** Network configuration and filtering rules are managed by the `agy-sandbox-network.service` unit (`Type=oneshot`, `RemainAfterExit=yes`), which invokes `ensure-network.sh` on system startup and `teardown-network.sh` on shutdown.
-- **Isolated DNS (`--dns=9.9.9.9`):** Queries resolve directly through Quad9 bypassing the host resolver, preventing DNS leaks and local host scanning via NetBIOS/mDNS.
+- **Dedicated Netfilter chains (`AGY-SANDBOX-FWD` & `AGY-SANDBOX-IN`):** Network filtering is isolated into dedicated custom chains anchored to `DOCKER-USER` and `INPUT`. Forward transit traffic from container bridge `agy0` to all private/special IPv4 ranges (RFC 1918, CGNAT, loopback, link-local, multicast, testnets) is unconditionally dropped. Host listening ports (SSH, DB, Docker daemon socket) are blocked via `AGY-SANDBOX-IN`, permitting only host DNS resolution (port 53 UDP/TCP) and established connections (`ESTABLISHED,RELATED`).
+- **Fail-Closed readiness marker:** Container startup strictly requires a healthy, isolated network state. `ensure-network.sh` creates the marker `/run/agy-sandbox/network.ready` only after all bridge, Netfilter, and RPDB routing rules are successfully applied and verified. The sandbox CLI initializer (`init-sandbox.sh`) halts container startup in Fail-Closed mode if this marker is missing.
+- **Two-tier RPDB kernel policy routing:** Routing rules are strictly bound to the incoming interface (`iif agy0`), guaranteeing protection even when split-tunnel VPNs manipulate host main/default routing tables. Intra-subnet traffic is allowed at priority 95 (`lookup main`), while private/special destination CIDRs are immediately rejected at priority 100 (`unreachable`).
+- **Hardened systemd daemon:** Network service scripts and configuration are copied to `/usr/local/lib/agy-sandbox/` owned by `root:root` with read-only permissions (`0755`/`0644`), eliminating Local Privilege Escalation (LPE) vulnerabilities. The systemd unit runs with isolation parameters `ProtectHome=yes`, `ProtectSystem=full`, `PrivateTmp=yes`, and manages the `/run/agy-sandbox` runtime directory.
+- **Dynamic Docker IPAM with zero conflicts:** By default, subnets are assigned automatically through standard Docker IPAM from the conflict-free pool (`172.17.0.0/16`-`172.31.0.0/16`), with support for explicit static subnet overrides via `sandbox.conf`.
+- **Isolated DNS (`--dns=9.9.9.9`, `--dns=149.112.112.112`):** Queries resolve directly through Quad9 bypassing the host resolver, preventing DNS leaks and local host scanning via NetBIOS/mDNS.
 - **Dropped network privileges:** The container runs without `CAP_NET_ADMIN` capability, preventing raw socket manipulation, ARP spoofing, or modifying internal network tables.
 - **Binary modification protection:** For pinned CLI versions (`AGY_VERSION != latest`), permissions on the `agy` binary are fixed to read and execute (`chmod 555`), and auto-update is blocked via `AGY_CLI_DISABLE_AUTO_UPDATE=1`. When running with `latest`, standard executable permissions (`chmod 755`) are preserved and self-updates remain active.
 - **Authorization and history isolation:** Session tokens and chat history are saved in a dedicated Docker volume (`agy-gemini-data -> /home/vscode/.gemini`), without mixing with repository files on the host.
@@ -157,17 +159,55 @@ agy-sandbox service status
 sudo agy-sandbox service disable
 ```
 
+### Configuration (`scripts/sandbox.conf` & Environment Overrides)
+
+The sandbox network stack uses a single centralized configuration file `scripts/sandbox.conf` as the Single Source of Truth (SSOT). When installed as a system service, the configuration is deployed to `/usr/local/lib/agy-sandbox/sandbox.conf`.
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `NETWORK_NAME` | `"agy_net"` | Docker bridge network name. |
+| `BRIDGE_NAME` | `"agy0"` | Linux kernel bridge interface name. |
+| `SUBNET` | `""` | Subnet CIDR. If empty (`""`), Docker native IPAM automatically allocates a conflict-free subnet from pool `172.17.0.0/16`-`172.31.0.0/16`. If set (e.g. `"172.16.151.0/24"`), this static CIDR is enforced. |
+| `DNS_PRIMARY` | `"9.9.9.9"` | Primary upstream DNS resolver (Quad9). |
+| `DNS_SECONDARY` | `"149.112.112.112"` | Secondary upstream DNS resolver (Quad9). |
+| `READY_FILE` | `"/run/agy-sandbox/network.ready"` | Fail-Closed readiness marker file path. |
+
+All variables in `sandbox.conf` can be overridden by environment variables without modifying the file directly:
+
+```bash
+# Example 1: Enforce a static subnet and custom upstream DNS
+sudo SUBNET="172.16.200.0/24" DNS_PRIMARY="1.1.1.1" agy-sandbox service install
+sudo agy-sandbox service enable
+
+# Example 2: Re-run network setup directly with temporary overrides
+sudo NETWORK_NAME="custom_net" BRIDGE_NAME="cbr0" /usr/local/lib/agy-sandbox/ensure-network.sh
+```
+
+### Systemd Service Hardening & Fail-Closed Protection
+
+- **Local Privilege Escalation (LPE) Prevention:** When running `sudo agy-sandbox service install`, all scripts and `sandbox.conf` are copied to `/usr/local/lib/agy-sandbox/` with ownership `root:root` and permissions `0755`/`0644`. The systemd service `agy-sandbox-network.service` references only this protected directory, preventing unprivileged users from modifying scripts executed by root.
+- **Systemd Sandboxing:** The service executes with `ProtectHome=yes`, `ProtectSystem=full`, `PrivateTmp=yes`, and systemd manages the runtime directory `/run/agy-sandbox`.
+- **Fail-Closed Guarantees:** Network setup writes `/run/agy-sandbox/network.ready` upon verifying all routing and firewall rules. `agy-sandbox` CLI initializer verifies this marker before generating devcontainers or launching environments.
+
 ---
 
 ### Verifying Network Isolation
 
-To verify Netfilter rules, routing tables, and DNS availability, a built-in audit is provided:
+To audit Netfilter rules, routing tables, and DNS availability, run the built-in diagnostic auditor:
 
 ```bash
 agy-sandbox diagnose
 # Or run the script directly:
 ~/.antigravity-sandbox/scripts/diagnose.sh
 ```
+
+The diagnostic suite validates 6 security checkpoints:
+1. **Docker Engine, Bridge Network (`agy_net`) & Readiness Marker:** Verifies daemon responsiveness, dynamic subnet discovery, bridge name mapping, and `/run/agy-sandbox/network.ready` existence.
+2. **Kernel Bridge Interface (`agy0`):** Confirms link existence and state in kernel.
+3. **Linux Kernel Policy Routing (`ip rule`):** Confirms priority 95 intra-subnet allowance (`lookup main`) and priority 100 `unreachable` rules across all 12 private/special IPv4 ranges, strictly scoped to incoming interface `iif agy0`.
+4. **Netfilter Packet Filtering (`iptables` / `ip6tables`):** Audits atomic jumps to custom chains `AGY-SANDBOX-FWD` and `AGY-SANDBOX-IN`, intra-subnet `RETURN`, DROP rules for all 12 private destination ranges, and host input restrictions (only port 53 DNS allowed).
+5. **DNS Resolver Reachability:** Issues a UDP query to Quad9 DNS (`9.9.9.9`) from the bridge interface.
+6. **Egress Connectivity & Intranet Isolation:** Probes public HTTPS connectivity and validates that host-internal endpoints are completely blocked (without requiring elevated raw socket privileges).
 
 ---
 
@@ -238,6 +278,7 @@ antigravity-sandbox/
 │   ├── install-agy.sh              # Standalone CLI downloader and version pinner
 │   └── setup.sh                    # Initial container setup (agy patch, volume permissions)
 ├── scripts/
+│   ├── sandbox.conf                # Central configuration (SSOT for network, bridge, subnets, and DNS)
 │   ├── ensure-network.sh           # Creation of agy_net network, Netfilter rules, and ip rule
 │   ├── teardown-network.sh         # Removal of agy_net network and reset of filtering rules
 │   ├── service.sh                  # Management of systemd unit (agy-sandbox-network.service)
