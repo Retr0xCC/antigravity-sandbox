@@ -5,6 +5,7 @@ set -euo pipefail
 # Antigravity Sandbox Network Persistence Manager
 # Generates, installs, and manages systemd service for
 # agy-sandbox-network (Type=oneshot, RemainAfterExit=yes)
+# Hardened against LPE (runs from /usr/local/lib/agy-sandbox)
 # ========================================================
 
 # Resolve symlinks to find real script location
@@ -18,8 +19,15 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 SERVICE_NAME="agy-sandbox-network.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
-ENSURE_SCRIPT="${SCRIPT_DIR}/ensure-network.sh"
-TEARDOWN_SCRIPT="${SCRIPT_DIR}/teardown-network.sh"
+SYSTEM_LIB_DIR="/usr/local/lib/agy-sandbox"
+SYSTEM_ENSURE_SCRIPT="${SYSTEM_LIB_DIR}/ensure-network.sh"
+SYSTEM_TEARDOWN_SCRIPT="${SYSTEM_LIB_DIR}/teardown-network.sh"
+
+if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/sandbox.conf"
+fi
+READY_MARKER="${READY_FILE:-/run/agy-sandbox/network.ready}"
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
@@ -62,8 +70,13 @@ Wants=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=${ENSURE_SCRIPT}
-ExecStop=${TEARDOWN_SCRIPT}
+RuntimeDirectory=agy-sandbox
+RuntimeDirectoryMode=0755
+ProtectHome=yes
+ProtectSystem=full
+PrivateTmp=yes
+ExecStart=${SYSTEM_ENSURE_SCRIPT}
+ExecStop=${SYSTEM_TEARDOWN_SCRIPT}
 
 [Install]
 WantedBy=multi-user.target
@@ -80,7 +93,7 @@ cmd_status() {
   if ! check_systemd_support; then
     echo "  [WARN] systemd is not running as init system in this environment."
     echo "         (Common inside Docker containers, minimal WSL2 distros, or non-systemd inits)."
-    echo "         Kernel rules must be applied manually via ${ENSURE_SCRIPT}."
+    echo "         Kernel rules must be applied manually via ${SCRIPT_DIR}/ensure-network.sh."
     return 3
   fi
 
@@ -106,10 +119,18 @@ cmd_status() {
   fi
 
   echo "  Unit path: ${UNIT_PATH}"
-  echo "  ExecStart: ${ENSURE_SCRIPT}"
-  echo "  ExecStop:  ${TEARDOWN_SCRIPT}"
+  echo "  ExecStart: ${SYSTEM_ENSURE_SCRIPT}"
+  echo "  ExecStop:  ${SYSTEM_TEARDOWN_SCRIPT}"
   echo "  Enabled:   ${is_enabled}"
   echo "  Active:    ${is_active}"
+
+  if [ -f "${SYSTEM_ENSURE_SCRIPT}" ]; then
+    local owner
+    owner=$(stat -c "%U:%G" "${SYSTEM_ENSURE_SCRIPT}" 2>/dev/null || echo "unknown")
+    echo "  System binary ownership: ${owner}"
+  else
+    echo "  [WARN] Script ${SYSTEM_ENSURE_SCRIPT} missing from system library directory."
+  fi
 
   if [ "${is_active}" = "active (running)" ]; then
     return 0
@@ -125,16 +146,19 @@ cmd_install() {
   fi
   ensure_sudo "Root privileges required to install systemd service."
 
-  echo "==> [antigravity-sandbox] Installing '${SERVICE_NAME}' to ${UNIT_PATH}..."
-  
-  # Ensure target scripts are executable
-  chmod +x "${ENSURE_SCRIPT}" "${TEARDOWN_SCRIPT}" 2>/dev/null || true
+  echo "==> [antigravity-sandbox] Installing isolated binaries and configuration to ${SYSTEM_LIB_DIR} (root:root)..."
+  ${SUDO} install -d -o root -g root -m 0755 "${SYSTEM_LIB_DIR}"
+  if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
+    ${SUDO} install -o root -g root -m 0644 "${SCRIPT_DIR}/sandbox.conf" "${SYSTEM_LIB_DIR}/sandbox.conf"
+  fi
+  ${SUDO} install -o root -g root -m 0755 "${SCRIPT_DIR}/ensure-network.sh" "${SYSTEM_ENSURE_SCRIPT}"
+  ${SUDO} install -o root -g root -m 0755 "${SCRIPT_DIR}/teardown-network.sh" "${SYSTEM_TEARDOWN_SCRIPT}"
 
-  # Write unit file
+  echo "==> [antigravity-sandbox] Installing '${SERVICE_NAME}' to ${UNIT_PATH}..."
   generate_unit_content | ${SUDO} tee "${UNIT_PATH}" >/dev/null
   ${SUDO} chmod 644 "${UNIT_PATH}"
   ${SUDO} systemctl daemon-reload
-  echo "==> [antigravity-sandbox] Successfully installed ${UNIT_PATH}."
+  echo "==> [antigravity-sandbox] Successfully installed hardened ${UNIT_PATH}."
 }
 
 cmd_enable() {
@@ -144,7 +168,7 @@ cmd_enable() {
   fi
   ensure_sudo "Root privileges required to enable and start systemd service."
 
-  if [ ! -f "${UNIT_PATH}" ]; then
+  if [ ! -f "${UNIT_PATH}" ] || [ ! -f "${SYSTEM_ENSURE_SCRIPT}" ]; then
     cmd_install
   fi
 
@@ -177,11 +201,19 @@ cmd_uninstall() {
 
   if [ -f "${UNIT_PATH}" ]; then
     ${SUDO} rm -f "${UNIT_PATH}"
-    ${SUDO} systemctl daemon-reload
     echo "==> [antigravity-sandbox] Removed ${UNIT_PATH}."
   else
     echo "==> [antigravity-sandbox] Unit file was not present."
   fi
+
+  if [ -d "${SYSTEM_LIB_DIR}" ]; then
+    ${SUDO} rm -rf "${SYSTEM_LIB_DIR}"
+    echo "==> [antigravity-sandbox] Removed ${SYSTEM_LIB_DIR}."
+  fi
+
+  ${SUDO} rm -f "${READY_MARKER}"
+  ${SUDO} systemctl daemon-reload
+  echo "==> [antigravity-sandbox] Service persistence completely removed."
 }
 
 usage() {
@@ -191,8 +223,8 @@ usage() {
   echo "  status     Check installation and running status of systemd persistence"
   echo "  enable     Install, enable and start agy-sandbox-network.service (enable --now)"
   echo "  disable    Stop and disable agy-sandbox-network.service (disable --now)"
-  echo "  install    Generate and install unit file into /etc/systemd/system/"
-  echo "  uninstall  Stop, disable, and remove unit file"
+  echo "  install    Generate and install unit file into /etc/systemd/system/ and scripts to /usr/local/lib/agy-sandbox"
+  echo "  uninstall  Stop, disable, remove unit file, system binaries, and readiness marker"
   echo "  generate   Print service unit file to stdout"
 }
 

@@ -18,6 +18,15 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/sandbox.conf"
+fi
+
+NETWORK_NAME="${NETWORK_NAME:-agy_net}"
+BRIDGE_NAME="${BRIDGE_NAME:-agy0}"
+READY_FILE="${READY_FILE:-/run/agy-sandbox/network.ready}"
+
 # Antigravity CLI Defaults derived directly from base/devcontainer.json
 BASE_DEVCONTAINER="${ROOT_DIR}/base/devcontainer.json"
 DEFAULT_AGY_VERSION=""
@@ -184,6 +193,7 @@ assemble_devcontainer_json() {
       settings_json=$(jq ".customizations.vscode.settings" "${base_json}")
     fi
 
+    # shellcheck disable=SC2016
     local jq_filter='.name = $name | .customizations.vscode.extensions = $exts | .customizations.vscode.settings = $settings | .build.args.AGY_VERSION = $ver | .remoteEnv.AGY_VERSION = $ver | .remoteEnv.AGY_PATCH = $patch | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE) | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)'
 
     jq --arg name "\${localWorkspaceFolderBasename} (${display_name} Sandbox)" \
@@ -325,9 +335,15 @@ do_init_sandbox() {
     chmod +x "${dest_devcontainer}/setup.sh"
   fi
 
-  # Ensure isolated docker network and dynamic kernel routing exist on host
+  # Ensure isolated docker network and dynamic kernel routing exist on host (Fail-Closed)
   if command -v docker >/dev/null 2>&1; then
-    "${SCRIPT_DIR}/ensure-network.sh" || true
+    echo "==> [antigravity-sandbox] Ensuring isolated network boundaries (Fail-Closed)..."
+    local ready_chk="${READY_FILE:-/run/agy-sandbox/network.ready}"
+    if ! "${SCRIPT_DIR}/ensure-network.sh" || [ ! -f "${ready_chk}" ]; then
+      echo -e "\n${CLR_RED}==> [antigravity-sandbox] FATAL: Network isolation failed or ${ready_chk} is missing!${CLR_RESET}" >&2
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Aborting initialization in Fail-Closed mode to prevent unisolated execution.${CLR_RESET}" >&2
+      exit 1
+    fi
   fi
 
   # Gitignore handling
@@ -404,8 +420,39 @@ tui_service_menu() {
     
     # Quick Status Line
     local net_status="INACTIVE"
-    if command -v docker >/dev/null 2>&1 && docker network inspect agy_net >/dev/null 2>&1; then
-      net_status="${CLR_GREEN}ACTIVE${CLR_RESET}"
+    local net_name="${NETWORK_NAME:-agy_net}"
+    local active_subnet="UNKNOWN"
+    local active_br="${BRIDGE_NAME:-agy0}"
+    local ready_marker="${READY_FILE:-/run/agy-sandbox/network.ready}"
+
+    if [ -f "${ready_marker}" ]; then
+      while IFS='=' read -r key val || [ -n "$key" ]; do
+        case "$key" in
+          NETWORK_NAME) [ -n "$val" ] && net_name="$val" ;;
+          ACTIVE_BRIDGE) [ -n "$val" ] && active_br="$val" ;;
+          ACTIVE_SUBNET) [ -n "$val" ] && active_subnet="$val" ;;
+        esac
+      done < "${ready_marker}"
+    fi
+
+    if command -v docker >/dev/null 2>&1 && docker network inspect "${net_name}" >/dev/null 2>&1; then
+      local sub_opt
+      sub_opt=$(docker network inspect "${net_name}" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "")
+      if [ -n "${sub_opt}" ] && [ "${sub_opt}" != "<no value>" ]; then active_subnet="${sub_opt}"; fi
+      local br_opt
+      br_opt=$(docker network inspect "${net_name}" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
+      if [ -n "${br_opt}" ] && [ "${br_opt}" != "<no value>" ]; then
+        active_br="${br_opt}"
+      else
+        local nid
+        nid=$(docker network inspect "${net_name}" --format '{{.Id}}' 2>/dev/null || echo "")
+        if [ -n "${nid}" ]; then active_br="br-${nid:0:12}"; fi
+      fi
+      if [ -f "${ready_marker}" ]; then
+        net_status="${CLR_GREEN}ACTIVE (Ready: ${active_subnet})${CLR_RESET}"
+      else
+        net_status="${CLR_YELLOW}ACTIVE (${active_subnet})${CLR_RESET}"
+      fi
     else
       net_status="${CLR_RED}NOT RUNNING${CLR_RESET}"
     fi
@@ -413,20 +460,9 @@ tui_service_menu() {
     local host_bound="INACTIVE"
     local sudo_cmd=""
     if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then sudo_cmd="sudo"; fi
-    local active_br="agy0"
-    if command -v docker >/dev/null 2>&1 && docker network inspect agy_net >/dev/null 2>&1; then
-      local br_opt
-      br_opt=$(docker network inspect agy_net --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
-      if [ -z "${br_opt}" ] || [ "${br_opt}" = "<no value>" ]; then
-        local nid
-        nid=$(docker network inspect agy_net --format '{{.Id}}' 2>/dev/null || echo "")
-        if [ -n "${nid}" ]; then active_br="br-${nid:0:12}"; fi
-      else
-        active_br="${br_opt}"
-      fi
-    fi
-    if command -v iptables >/dev/null 2>&1 && (${sudo_cmd} iptables -C INPUT -i "${active_br}" -j DROP >/dev/null 2>&1 || ${sudo_cmd} iptables -C INPUT -i agy0 -j DROP >/dev/null 2>&1); then
-      host_bound="${CLR_GREEN}ACTIVE (BLOCKED)${CLR_RESET}"
+
+    if command -v iptables >/dev/null 2>&1 && (${sudo_cmd} iptables -C INPUT -i "${active_br}" -j AGY-SANDBOX-IN >/dev/null 2>&1 || ${sudo_cmd} iptables -C INPUT -i "${active_br}" -j DROP >/dev/null 2>&1 || ${sudo_cmd} iptables -C INPUT -i agy0 -j DROP >/dev/null 2>&1); then
+      host_bound="${CLR_GREEN}ACTIVE (CHAIN AGY-SANDBOX-IN)${CLR_RESET}"
     else
       host_bound="${CLR_YELLOW}NOT ACTIVE${CLR_RESET}"
     fi
@@ -442,8 +478,8 @@ tui_service_menu() {
       sysd_status="${CLR_DIM}NOT INSTALLED${CLR_RESET}"
     fi
 
-    echo -e "  Docker Network (agy_net):    ${net_status}"
-    echo -e "  Host Boundary (INPUT DROP):  ${host_bound}"
+    echo -e "  Docker Network (${net_name}):    ${net_status}"
+    echo -e "  Host Boundary (AGY-SANDBOX-IN): ${host_bound}"
     echo -e "  Systemd Persistence:         ${sysd_status}"
     echo ""
     echo -e "  ${CLR_BOLD}[1]${CLR_RESET} Provision / Ensure Network Isolation now (ensure-network.sh)"
@@ -466,7 +502,12 @@ tui_service_menu() {
           continue
         fi
         echo ""
-        "${SCRIPT_DIR}/ensure-network.sh" || true
+        local ready_chk="${READY_FILE:-/run/agy-sandbox/network.ready}"
+        if ! "${SCRIPT_DIR}/ensure-network.sh" || [ ! -f "${ready_chk}" ]; then
+          echo -e "\n${CLR_RED}==> [antigravity-sandbox] Network isolation failed or ${ready_chk} missing!${CLR_RESET}"
+        else
+          echo -e "\n${CLR_GREEN}==> [antigravity-sandbox] Network isolation successfully verified.${CLR_RESET}"
+        fi
         pause_enter
         ;;
       2)
