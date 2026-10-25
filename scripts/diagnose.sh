@@ -778,7 +778,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       fi
 
       # Verify shared configuration symlinks
-      local symlinks_ok=true
+      symlinks_ok=true
       for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
         target_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/${s_file}" 2>/dev/null || echo "")
         if [ "${target_link}" = "/home/vscode/.gemini-shared/${s_file}" ]; then
