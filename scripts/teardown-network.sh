@@ -16,15 +16,26 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Save any explicit caller environment overrides before sourcing sandbox.conf
+_ENV_NET="${NETWORK_NAME:-}"
+_ENV_BR="${BRIDGE_NAME:-}"
+_ENV_SUBNET="${SUBNET:-}"
+_ENV_DNS1="${DNS_PRIMARY:-}"
+_ENV_DNS2="${DNS_SECONDARY:-}"
+_ENV_READY="${READY_FILE:-}"
+
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/sandbox.conf"
 fi
 
-NETWORK_NAME="${NETWORK_NAME:-agy_net}"
-DEFAULT_SUBNET="172.16.151.0/24"
-BRIDGE_NAME="${BRIDGE_NAME:-agy0}"
-READY_FILE="${READY_FILE:-/run/agy-sandbox/network.ready}"
+# Apply environment variable overrides if explicitly provided
+[ -n "${_ENV_NET}" ] && NETWORK_NAME="${_ENV_NET}"
+[ -n "${_ENV_BR}" ] && BRIDGE_NAME="${_ENV_BR}"
+[ -n "${_ENV_SUBNET}" ] && SUBNET="${_ENV_SUBNET}"
+[ -n "${_ENV_DNS1}" ] && DNS_PRIMARY="${_ENV_DNS1}"
+[ -n "${_ENV_DNS2}" ] && DNS_SECONDARY="${_ENV_DNS2}"
+[ -n "${_ENV_READY}" ] && READY_FILE="${_ENV_READY}"
 
 BLOCKED_RANGES=(
   "0.0.0.0/8"
@@ -66,8 +77,8 @@ fi
 
 echo "==> [antigravity-sandbox] Tearing down sandbox network isolation..."
 
-ACTIVE_BRIDGE="${BRIDGE_NAME:-br-agy}"
-ACTIVE_SUBNET="${DEFAULT_SUBNET:-172.16.151.0/24}"
+ACTIVE_BRIDGE="${BRIDGE_NAME}"
+ACTIVE_SUBNET="${SUBNET}"
 
 if [ -f "${READY_FILE}" ]; then
   while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -114,7 +125,8 @@ if command -v iptables >/dev/null 2>&1; then
     done
 
     # Clean legacy direct DROP rules
-    for snet in "${ACTIVE_SUBNET}" "${DEFAULT_SUBNET}" "172.16.151.0/24"; do
+    for snet in "${ACTIVE_SUBNET}" "${SUBNET:-}" "172.16.151.0/24"; do
+      [ -z "${snet}" ] && continue
       for dest in "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12"; do
         while ${SUDO} iptables -C DOCKER-USER -s "${snet}" -d "${dest}" -j DROP >/dev/null 2>&1; do
           ${SUDO} iptables -D DOCKER-USER -s "${snet}" -d "${dest}" -j DROP 2>/dev/null || break
@@ -214,7 +226,8 @@ if command -v ip >/dev/null 2>&1; then
     done
   done
 
-  for snet in "${ACTIVE_SUBNET}" "${DEFAULT_SUBNET}" "172.16.151.0/24"; do
+  for snet in "${ACTIVE_SUBNET}" "${SUBNET:-}" "172.16.151.0/24"; do
+    [ -z "${snet}" ] && continue
     while ip rule show 2>/dev/null | grep -E "[[:space:]]+from ${snet}[[:space:]]+" >/dev/null 2>&1; do
       ${SUDO} ip rule del from "${snet}" 2>/dev/null || break
     done
