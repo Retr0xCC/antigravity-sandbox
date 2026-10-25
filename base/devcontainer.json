@@ -11,6 +11,7 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
   "mounts": [
     "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",
+    "source=agy-shared-cache,target=/home/vscode/.cache,type=volume",
     "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",
     "source=${localWorkspaceFolder}/.devcontainer,target=${containerWorkspaceFolder}/.devcontainer,type=bind,readonly"
   ],
@@ -35,6 +36,8 @@
   "remoteEnv": {
     "AGY_VERSION": "1.4.6",
     "AGY_PATCH": "true",
+    "UV_CACHE_DIR": "/home/vscode/.cache/uv",
+    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",
     "SSH_AUTH_SOCK": "",
     "VSCODE_GIT_IPC_HANDLE": "",
     "VSCODE_GIT_ASKPASS_NODE": "",

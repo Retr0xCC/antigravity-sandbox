@@ -47,6 +47,8 @@ fi
 [ -n "${_ENV_CPUS}" ] && CPUS_LIMIT="${_ENV_CPUS}"
 [ -n "${_ENV_TMPFS}" ] && TMPFS_SIZE="${_ENV_TMPFS}"
 
+CLI_MOUNTS=()
+
 # Antigravity CLI Defaults derived directly from base/devcontainer.json
 BASE_DEVCONTAINER="${ROOT_DIR}/base/devcontainer.json"
 DEFAULT_AGY_VERSION=""
@@ -253,6 +255,11 @@ assemble_devcontainer_json() {
               $m
             else
               ["source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"] + $m
+            end) as $m1 |
+           (if ($m1 | any(startswith("source=agy-shared-cache,target=/home/vscode/.cache"))) then
+              $m1
+            else
+              $m1 + ["source=agy-shared-cache,target=/home/vscode/.cache,type=volume"]
             end) as $m2 |
            (if ($m2 | any(startswith("source=agy-gemini-data-"))) then
               $m2
@@ -266,6 +273,8 @@ assemble_devcontainer_json() {
       | .build.args.AGY_VERSION = $ver
       | .remoteEnv.AGY_VERSION = $ver
       | .remoteEnv.AGY_PATCH = $patch
+      | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
+      | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
       | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
       | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
     '
@@ -303,8 +312,14 @@ assemble_devcontainer_json() {
     if ! echo "${template_content}" | grep -q "source=agy-shared-config"; then
       template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",|')
     fi
+    if ! echo "${template_content}" | grep -q "source=agy-shared-cache"; then
+      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-cache,target=/home/vscode/.cache,type=volume",|')
+    fi
     if ! echo "${template_content}" | grep -q "source=agy-gemini-data-"; then
       template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",|')
+    fi
+    if ! echo "${template_content}" | grep -q "UV_CACHE_DIR"; then
+      template_content=$(echo "${template_content}" | sed 's|"remoteEnv": {|"remoteEnv": {\n    "UV_CACHE_DIR": "/home/vscode/.cache/uv",\n    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",|')
     fi
     echo -e "${template_content}" > "${output_file}"
   fi
@@ -640,6 +655,11 @@ do_init_sandbox() {
               $m
             else
               ["source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"] + $m
+            end) as $m1 |
+           (if ($m1 | any(startswith("source=agy-shared-cache,target=/home/vscode/.cache"))) then
+              $m1
+            else
+              $m1 + ["source=agy-shared-cache,target=/home/vscode/.cache,type=volume"]
             end) as $m2 |
            (if ($m2 | any(startswith("source=agy-gemini-data-"))) then
               $m2
@@ -649,6 +669,8 @@ do_init_sandbox() {
            $m3 + ($extra_mounts | map(. as $x | select(($m3 | index($x)) == null)))
           )
         )
+        | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
+        | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
       '
       jq --arg net "${NETWORK_NAME}" \
          --arg dns1 "${DNS_PRIMARY}" \
@@ -665,8 +687,14 @@ do_init_sandbox() {
       if ! grep -q "source=agy-shared-config" "${dest_devcontainer}/devcontainer.json"; then
         sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
       fi
+      if ! grep -q "source=agy-shared-cache" "${dest_devcontainer}/devcontainer.json"; then
+        sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-cache,target=/home/vscode/.cache,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      fi
       if ! grep -q "source=agy-gemini-data-" "${dest_devcontainer}/devcontainer.json"; then
         sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      fi
+      if ! grep -q "UV_CACHE_DIR" "${dest_devcontainer}/devcontainer.json"; then
+        sed -i 's|"remoteEnv": {|"remoteEnv": {\n    "UV_CACHE_DIR": "/home/vscode/.cache/uv",\n    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
       fi
     fi
   else

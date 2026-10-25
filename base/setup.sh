@@ -17,6 +17,13 @@ for vol in "/home/vscode/.gemini" "/home/vscode/.gemini-shared"; do
     fi
 done
 
+if [ -d "/home/vscode/.cache" ] && [ ! -w "/home/vscode/.cache" ]; then
+    sudo -n chown -R vscode:vscode /home/vscode/.cache 2>/dev/null || true
+fi
+
+# Ensure shared cache subdirectories exist
+mkdir -p /home/vscode/.cache/uv /home/vscode/.cache/agy-downloads
+
 # Orchestrate shared configuration symlinks between .gemini-shared and .gemini
 mkdir -p /home/vscode/.gemini/antigravity-cli /home/vscode/.gemini/config
 mkdir -p /home/vscode/.gemini-shared/antigravity-cli /home/vscode/.gemini-shared/config
