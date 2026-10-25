@@ -14,6 +14,9 @@
     "source=${localWorkspaceFolder}/.devcontainer,target=${containerWorkspaceFolder}/.devcontainer,type=bind,readonly"
   ],
   "initializeCommand": "bash -c 'ready=\"/run/agy-sandbox/network.ready\"; if [ ! -s \"$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=$(grep \"^ACTIVE_BRIDGE=\" \"$ready\" 2>/dev/null | cut -d= -f2); [ -z \"$br\" ] && br=\"agy0\"; if ! ip rule show 2>/dev/null | grep -q \"iif ${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for ${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'",
+  "capDrop": [
+    "NET_RAW"
+  ],
   "runArgs": [
     "--network=agy_net",
     "--dns=9.9.9.9",
