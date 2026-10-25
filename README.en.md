@@ -68,8 +68,9 @@ Before deploying Antigravity Sandbox, ensure your host meets the following prere
  │   - Pinned binary write lock: chmod 555 agy                 │
  │   - Credential leaks blocked: askpass=/bin/false, IPC null  │
  │   - Isolated workspace: /workspaces/<proj>                  │
- │   - Persistent state volume:                                │
- │       agy-gemini-data ──► /home/vscode/.gemini              │
+ │   - Decoupled state volumes:                                │
+ │       agy-shared-config ──► /home/vscode/.gemini-shared     │
+ │       agy-gemini-data   ──► /home/vscode/.gemini            │
  └───────────────────────────────┬─────────────────────────────┘
                                  │
                                  │  Isolated docker network
@@ -100,7 +101,7 @@ Before deploying Antigravity Sandbox, ensure your host meets the following prere
 - **Isolated dual DNS (`9.9.9.9`, `149.112.112.112`):** Queries resolve directly through Quad9 upstream resolvers bypassing the host resolver, preventing DNS leaks and local host scanning via NetBIOS/mDNS.
 - **Dropped network & system privileges:** The container runs with `--security-opt=no-new-privileges:true` and drops `CAP_NET_RAW` capability, preventing raw socket manipulation, ICMP packet craft, ARP spoofing, or modifying internal network tables.
 - **Binary modification protection:** For pinned CLI versions (`AGY_VERSION != latest`), permissions on the `agy` binary are fixed to read and execute (`chmod 555`), and auto-update is blocked via `AGY_CLI_DISABLE_AUTO_UPDATE=1`. When running with `latest`, standard executable permissions (`chmod 755`) are preserved and self-updates remain active.
-- **Authorization and history isolation:** Session tokens and chat history are saved in a dedicated Docker volume (`agy-gemini-data-${localWorkspaceFolderBasename} -> /home/vscode/.gemini`), without mixing with repository files on the host.
+- **Decoupled persistent volume storage:** Global shared configuration (auth credentials, settings, installation ID, MCP config) is preserved in a shared Docker volume (`agy-shared-config -> /home/vscode/.gemini-shared`), preventing repetitive logins across projects. Project-isolated context (conversations, brain graph, local databases, and caches) remains in a project-scoped volume (`agy-gemini-data-${localWorkspaceFolderBasename} -> /home/vscode/.gemini`). `setup.sh` seamlessly links shared configurations at runtime.
 - **Protected `.devcontainer` configuration:** The `.devcontainer` directory is mounted read-only (`type=bind,readonly`) inside the container, preventing an in-container agent from tampering with container lifecycle scripts or `devcontainer.json`.
 
 ---
@@ -309,7 +310,7 @@ The diagnostic suite validates 8 comprehensive security checkpoints:
 ### Container Lifecycle (setup.sh)
 
 The initial setup script `setup.sh` is pre-baked in `/usr/local/share/agy-sandbox/setup.sh` and runs during container creation (`postCreateCommand`):
-* Verifies non-root writable permissions on the `/home/vscode/.gemini` state volume;
+* Verifies non-root writable permissions on persistent volumes (`/home/vscode/.gemini`, `/home/vscode/.gemini-shared`);
 * Safely registers the target workspace in Git `safe.directory`, automatically resolving Git worktree pointers (`gitdir:`) to avoid dubious ownership errors without insecure wildcards (`safe.directory "*"`);
 * Conditionally executes the pre-baked patcher (`/usr/local/share/agy-sandbox/patcher/manager.py`) purely offline without downloading external code;
 * Locks the binary against modification (`chmod 555`) when a version is pinned, or preserves `chmod 755` for `latest`;

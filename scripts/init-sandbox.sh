@@ -247,7 +247,21 @@ assemble_devcontainer_json() {
             startswith("--cpus=") or
             startswith("--tmpfs=/tmp:")
           ) | not)))
-      | .mounts = ((.mounts // []) as $m | $m + ($extra_mounts | map(. as $x | select(($m | index($x)) == null))))
+      | .mounts = (
+          ((.mounts // []) as $m |
+           (if ($m | any(startswith("source=agy-shared-config,target=/home/vscode/.gemini-shared"))) then
+              $m
+            else
+              ["source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"] + $m
+            end) as $m2 |
+           (if ($m2 | any(startswith("source=agy-gemini-data-"))) then
+              $m2
+            else
+              $m2 + ["source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume"]
+            end) as $m3 |
+           $m3 + ($extra_mounts | map(. as $x | select(($m3 | index($x)) == null)))
+          )
+        )
       | .initializeCommand = $init_cmd
       | .build.args.AGY_VERSION = $ver
       | .remoteEnv.AGY_VERSION = $ver
@@ -286,6 +300,12 @@ assemble_devcontainer_json() {
     template_content="${template_content//\"--memory=8g\"/\"--memory=${MEMORY_LIMIT}\"}"
     template_content="${template_content//\"--cpus=4\"/\"--cpus=${CPUS_LIMIT}\"}"
     template_content="${template_content//\"size=2g\"/\"size=${TMPFS_SIZE}\"}"
+    if ! echo "${template_content}" | grep -q "source=agy-shared-config"; then
+      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",|')
+    fi
+    if ! echo "${template_content}" | grep -q "source=agy-gemini-data-"; then
+      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",|')
+    fi
     echo -e "${template_content}" > "${output_file}"
   fi
 }
@@ -614,7 +634,21 @@ do_init_sandbox() {
             startswith("--cpus=") or
             startswith("--tmpfs=/tmp:")
           ) | not)))
-        | .mounts = ((.mounts // []) as $m | $m + ($extra_mounts | map(. as $x | select(($m | index($x)) == null))))
+        | .mounts = (
+          ((.mounts // []) as $m |
+           (if ($m | any(startswith("source=agy-shared-config,target=/home/vscode/.gemini-shared"))) then
+              $m
+            else
+              ["source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"] + $m
+            end) as $m2 |
+           (if ($m2 | any(startswith("source=agy-gemini-data-"))) then
+              $m2
+            else
+              $m2 + ["source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume"]
+            end) as $m3 |
+           $m3 + ($extra_mounts | map(. as $x | select(($m3 | index($x)) == null)))
+          )
+        )
       '
       jq --arg net "${NETWORK_NAME}" \
          --arg dns1 "${DNS_PRIMARY}" \
@@ -627,6 +661,13 @@ do_init_sandbox() {
          "${custom_filter}" \
          "${dest_devcontainer}/devcontainer.json" > "${tmp_dc}"
       mv "${tmp_dc}" "${dest_devcontainer}/devcontainer.json"
+    elif [ -f "${dest_devcontainer}/devcontainer.json" ]; then
+      if ! grep -q "source=agy-shared-config" "${dest_devcontainer}/devcontainer.json"; then
+        sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      fi
+      if ! grep -q "source=agy-gemini-data-" "${dest_devcontainer}/devcontainer.json"; then
+        sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      fi
     fi
   else
     echo "==> [antigravity-sandbox] Assembling declarative template from base..."
