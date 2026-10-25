@@ -172,6 +172,30 @@ audit_egress_isolation() {
     fi
   fi
 
+  # In-container shared cache verification
+  if [ -z "${exec_prefix}" ]; then
+    if [ -d /home/vscode/.cache ]; then
+      local c_owner
+      c_owner=$(stat -c "%U:%G" /home/vscode/.cache 2>/dev/null || echo "unknown")
+      if [ "${c_owner}" = "vscode:vscode" ]; then
+        log_pass "Container: /home/vscode/.cache exists and is owned by vscode:vscode."
+      fi
+      if grep -q " /home/vscode/\.cache " /proc/mounts 2>/dev/null || mountpoint -q /home/vscode/.cache 2>/dev/null; then
+        log_pass "Container: /home/vscode/.cache is mounted."
+      fi
+      if [ -w /home/vscode/.cache ]; then
+        log_pass "Container: /home/vscode/.cache is writable by vscode."
+      else
+        log_fail "Container: /home/vscode/.cache is NOT writable by vscode."
+      fi
+      if [ -d /home/vscode/.cache/uv ] && [ -d /home/vscode/.cache/agy-downloads ]; then
+        log_pass "Container: /home/vscode/.cache contains uv and agy-downloads directories."
+      else
+        log_fail "Container: /home/vscode/.cache missing uv or agy-downloads directories."
+      fi
+    fi
+  fi
+
   # 1. Gateway host probe
   local gw_blocked=true
   for port in 22 80 2375 53; do
@@ -517,13 +541,20 @@ if [ -f "${ROOT_DIR}/base/Dockerfile" ]; then
     log_fail "base/Dockerfile: Antigravity CLI patcher commit is not pinned to a 40-character SHA."
   fi
 
-  # 3. Pre-creation of /home/vscode/.gemini and /home/vscode/.gemini-shared
+  # 3. Pre-creation of /home/vscode/.gemini, /home/vscode/.gemini-shared, and /home/vscode/.cache
   if grep -q "/home/vscode/\.gemini" "${ROOT_DIR}/base/Dockerfile" && \
      grep -q "/home/vscode/\.gemini-shared" "${ROOT_DIR}/base/Dockerfile" && \
      grep -E "chown -R vscode:vscode.*\.gemini.*\.gemini-shared" "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
     log_pass "base/Dockerfile: /home/vscode/.gemini and /home/vscode/.gemini-shared pre-created with unprivileged ownership (vscode:vscode, 0700)."
   else
     log_warn "base/Dockerfile: /home/vscode/.gemini and /home/vscode/.gemini-shared pre-creation with unprivileged ownership not detected."
+  fi
+
+  if grep -q "/home/vscode/\.cache" "${ROOT_DIR}/base/Dockerfile" && \
+     grep -E "chown -R vscode:vscode.*\.cache" "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
+    log_pass "base/Dockerfile: /home/vscode/.cache pre-created with unprivileged ownership (vscode:vscode)."
+  else
+    log_fail "base/Dockerfile: /home/vscode/.cache pre-creation with vscode:vscode ownership not detected."
   fi
 
   # 4. setup.sh copied to /usr/local/share/agy-sandbox/setup.sh
@@ -601,7 +632,7 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_fail "base/devcontainer.json: Missing one or more credential blocking flags in customizations.vscode.settings."
   fi
 
-  # 2. remoteEnv channel neutralization (F1)
+  # 2. remoteEnv channel neutralization and tool cache directories (F1)
   if jq -e '.remoteEnv.SSH_AUTH_SOCK == "" and
             .remoteEnv.VSCODE_GIT_IPC_HANDLE == "" and
             .remoteEnv.VSCODE_GIT_ASKPASS_NODE == "" and
@@ -611,6 +642,13 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: Host IPC and Askpass channels neutralized in remoteEnv (F1)."
   else
     log_fail "base/devcontainer.json: remoteEnv missing IPC/Askpass neutralization variables (F1 risk!)."
+  fi
+
+  if jq -e '.remoteEnv.UV_CACHE_DIR == "/home/vscode/.cache/uv" and
+            .remoteEnv.AGY_CACHE_DIR == "/home/vscode/.cache/agy-downloads"' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Tool cache directories declared in remoteEnv (UV_CACHE_DIR, AGY_CACHE_DIR)."
+  else
+    log_fail "base/devcontainer.json: Missing UV_CACHE_DIR or AGY_CACHE_DIR declaration in remoteEnv."
   fi
 
   # 3. Fail-Closed initializeCommand (F2)
@@ -661,6 +699,12 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: Shared global configuration volume configured (agy-shared-config)."
   else
     log_fail "base/devcontainer.json: Missing shared configuration volume in mounts (agy-shared-config)."
+  fi
+
+  if echo "${mounts_str}" | grep -E "source=agy-shared-cache,target=/home/vscode/\.cache" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Shared cache volume configured (agy-shared-cache)."
+  else
+    log_fail "base/devcontainer.json: Missing shared cache volume in mounts (agy-shared-cache)."
   fi
 
   if echo "${mounts_str}" | grep -E "source=agy-gemini-data-\\\$\{localWorkspaceFolderBasename\}" >/dev/null 2>&1; then
@@ -751,6 +795,37 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       log_warn "Container: /home/vscode/.gemini-shared directory missing."
     fi
 
+    # Verify /home/vscode/.cache volume, ownership, writability, and subdirectories in live container
+    if docker exec "${active_cid}" test -d /home/vscode/.cache 2>/dev/null; then
+      cache_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /home/vscode/.cache 2>/dev/null || echo "unknown")
+      if [ "${cache_owner}" = "vscode:vscode" ]; then
+        log_pass "Container: /home/vscode/.cache exists and is owned by vscode:vscode."
+      else
+        log_warn "Container: /home/vscode/.cache owned by '${cache_owner}' (expected vscode:vscode)."
+      fi
+
+      if docker exec -u vscode "${active_cid}" test -w /home/vscode/.cache 2>/dev/null; then
+        log_pass "Container: /home/vscode/.cache is writable by vscode."
+      else
+        log_fail "Container: /home/vscode/.cache is NOT writable by vscode."
+      fi
+
+      cache_subdirs_ok=true
+      for sdir in "uv" "agy-downloads"; do
+        if docker exec "${active_cid}" test -d "/home/vscode/.cache/${sdir}" 2>/dev/null; then
+          :
+        else
+          cache_subdirs_ok=false
+          log_fail "Container: /home/vscode/.cache/${sdir} directory missing."
+        fi
+      done
+      if [ "${cache_subdirs_ok}" = "true" ]; then
+        log_pass "Container: /home/vscode/.cache contains uv and agy-downloads directories."
+      fi
+    else
+      log_fail "Container: /home/vscode/.cache directory missing."
+    fi
+
     # Stage 3 Live container inspection (docker inspect)
     c_inspect=$(docker inspect "${active_cid}" 2>/dev/null || echo "[]")
     if [ "${c_inspect}" != "[]" ]; then
@@ -790,6 +865,13 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         log_fail "Container: .devcontainer mount is writable (RW: true, F17 risk!)."
       else
         log_info "Container: .devcontainer dedicated mount not detected in container Mounts."
+      fi
+
+      cache_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination == "/home/vscode/.cache") | .Name // .Source' 2>/dev/null || echo "")
+      if [ -n "${cache_mount}" ]; then
+        log_pass "Container: /home/vscode/.cache is mounted (${cache_mount})."
+      else
+        log_fail "Container: /home/vscode/.cache is NOT mounted."
       fi
 
       # Stage 4 Git Worktree mounts protection (FEAT-01)
