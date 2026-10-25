@@ -18,19 +18,37 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Save any explicit caller environment overrides before sourcing sandbox.conf
+_ENV_NET="${NETWORK_NAME:-}"
+_ENV_BR="${BRIDGE_NAME:-}"
+_ENV_SUBNET="${SUBNET:-}"
+_ENV_DNS1="${DNS_PRIMARY:-}"
+_ENV_DNS2="${DNS_SECONDARY:-}"
+_ENV_READY="${READY_FILE:-}"
+_ENV_PIDS="${PIDS_LIMIT:-}"
+_ENV_MEM="${MEMORY_LIMIT:-}"
+_ENV_CPUS="${CPUS_LIMIT:-}"
+_ENV_TMPFS="${TMPFS_SIZE:-}"
+
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/sandbox.conf"
 fi
 
-NETWORK_NAME="${NETWORK_NAME:-agy_net}"
-DEFAULT_SUBNET="${DEFAULT_SUBNET:-172.16.151.0/24}"
-BRIDGE_NAME="${BRIDGE_NAME:-agy0}"
-READY_FILE="${READY_FILE:-/run/agy-sandbox/network.ready}"
+# Apply environment variable overrides if explicitly provided
+[ -n "${_ENV_NET}" ] && NETWORK_NAME="${_ENV_NET}"
+[ -n "${_ENV_BR}" ] && BRIDGE_NAME="${_ENV_BR}"
+[ -n "${_ENV_SUBNET}" ] && SUBNET="${_ENV_SUBNET}"
+[ -n "${_ENV_DNS1}" ] && DNS_PRIMARY="${_ENV_DNS1}"
+[ -n "${_ENV_DNS2}" ] && DNS_SECONDARY="${_ENV_DNS2}"
+[ -n "${_ENV_READY}" ] && READY_FILE="${_ENV_READY}"
+[ -n "${_ENV_PIDS}" ] && PIDS_LIMIT="${_ENV_PIDS}"
+[ -n "${_ENV_MEM}" ] && MEMORY_LIMIT="${_ENV_MEM}"
+[ -n "${_ENV_CPUS}" ] && CPUS_LIMIT="${_ENV_CPUS}"
+[ -n "${_ENV_TMPFS}" ] && TMPFS_SIZE="${_ENV_TMPFS}"
 
-# Fix F4: Initialize ACTIVE_BRIDGE and ACTIVE_SUBNET to prevent unbound variable crash with set -u
-ACTIVE_BRIDGE="${BRIDGE_NAME:-br-agy}"
-ACTIVE_SUBNET="${DEFAULT_SUBNET:-172.16.151.0/24}"
+ACTIVE_BRIDGE="${BRIDGE_NAME}"
+ACTIVE_SUBNET="${SUBNET}"
 
 if [ -f "${READY_FILE}" ]; then
   while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -173,7 +191,7 @@ fi
 # --------------------------------------------------------
 # 1. Docker Daemon, Bridge Network & Fail-Closed Marker
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[1/6] Docker Engine, Bridge Network (${NETWORK_NAME}) & Readiness Marker${CLR_RESET}"
+echo -e "${CLR_BOLD}[1/8] Docker Engine, Bridge Network (${NETWORK_NAME}) & Readiness Marker${CLR_RESET}"
 if [ -f "${READY_FILE}" ]; then
   log_pass "Fail-Closed marker exists at ${READY_FILE} (network ready)."
 else
@@ -216,7 +234,7 @@ echo ""
 # --------------------------------------------------------
 # 2. Kernel Bridge Interface
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[2/6] Kernel Bridge Interface (${ACTIVE_BRIDGE})${CLR_RESET}"
+echo -e "${CLR_BOLD}[2/8] Kernel Bridge Interface (${ACTIVE_BRIDGE})${CLR_RESET}"
 if command -v ip >/dev/null 2>&1; then
   if ip link show "${ACTIVE_BRIDGE}" >/dev/null 2>&1; then
     log_pass "Interface '${ACTIVE_BRIDGE}' exists in kernel."
@@ -233,7 +251,7 @@ echo ""
 # --------------------------------------------------------
 # 3. Linux Kernel Policy Routing (ip rule)
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[3/6] Linux Kernel Policy Routing (ip rule)${CLR_RESET}"
+echo -e "${CLR_BOLD}[3/8] Linux Kernel Policy Routing (ip rule)${CLR_RESET}"
 if command -v ip >/dev/null 2>&1; then
   rules_dump=$(${SUDO} ip rule show 2>/dev/null || ip rule show 2>/dev/null || echo "")
 
@@ -275,7 +293,7 @@ echo ""
 # --------------------------------------------------------
 # 4. Netfilter Firewall (DOCKER-USER & INPUT chains)
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[4/6] Netfilter Packet Filtering (iptables)${CLR_RESET}"
+echo -e "${CLR_BOLD}[4/8] Netfilter Packet Filtering (iptables)${CLR_RESET}"
 if command -v iptables >/dev/null 2>&1; then
   if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
     if ! sudo -n true 2>/dev/null; then
@@ -352,7 +370,7 @@ echo ""
 # --------------------------------------------------------
 # 5. IPv6 & Systemd Persistence Status
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[5/6] IPv6 Boundary & Systemd Persistence${CLR_RESET}"
+echo -e "${CLR_BOLD}[5/8] IPv6 Boundary & Systemd Persistence${CLR_RESET}"
 
 # IPv6 Sysctl & Rules
 if command -v sysctl >/dev/null 2>&1; then
@@ -438,14 +456,265 @@ fi
 echo ""
 
 # --------------------------------------------------------
-# 6. Container Boundary Verification
+# 6. Supply Chain Pinning & Image Integrity (SEC-03, CNT-03)
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[6/6] Container Egress Boundary Tests (TCP/HTTP Probes)${CLR_RESET}"
+echo -e "${CLR_BOLD}[6/8] Supply Chain Pinning & Image Integrity (SEC-03, CNT-03)${CLR_RESET}"
+
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Check base/Dockerfile
+if [ -f "${ROOT_DIR}/base/Dockerfile" ]; then
+  # 1. uv pinning by digest
+  if grep -E "^COPY --from=ghcr\.io/astral-sh/uv:.*@sha256:[a-f0-9]{64}" "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
+    uv_pin=$(grep -E "^COPY --from=ghcr\.io/astral-sh/uv:" "${ROOT_DIR}/base/Dockerfile" | head -n1 | awk '{print $2}' | cut -d= -f2 || echo "")
+    log_pass "base/Dockerfile: uv package manager pinned by immutable SHA256 digest (${uv_pin})."
+  elif grep -E "^COPY --from=ghcr\.io/astral-sh/uv:latest" "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
+    log_fail "base/Dockerfile: uv uses unpinned floating ':latest' tag (supply chain risk!)."
+  else
+    log_warn "base/Dockerfile: uv copy instruction not recognized or missing SHA256 digest."
+  fi
+
+  # 2. Patcher commit pinning
+  if grep -E 'ARG PATCHER_COMMIT="[a-f0-9]{40}"' "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1 || grep -E 'PATCHER_COMMIT="[a-f0-9]{40}"' "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
+    patch_commit=$(grep -E 'PATCHER_COMMIT=' "${ROOT_DIR}/base/Dockerfile" | head -n1 | cut -d= -f2- | tr -d '"' || echo "")
+    log_pass "base/Dockerfile: Antigravity CLI patcher commit pinned with immutable SHA (${patch_commit:0:12})."
+  else
+    log_fail "base/Dockerfile: Antigravity CLI patcher commit is not pinned to a 40-character SHA."
+  fi
+
+  # 3. Pre-creation of /home/vscode/.gemini
+  if grep -q "/home/vscode/\.gemini" "${ROOT_DIR}/base/Dockerfile" && grep -q "chown -R vscode:vscode /home/vscode/\.gemini" "${ROOT_DIR}/base/Dockerfile"; then
+    log_pass "base/Dockerfile: /home/vscode/.gemini pre-created with unprivileged ownership (vscode:vscode, 0700)."
+  else
+    log_warn "base/Dockerfile: /home/vscode/.gemini pre-creation with unprivileged ownership not detected."
+  fi
+
+  # 4. setup.sh copied to /usr/local/share/agy-sandbox/setup.sh
+  if grep -q "setup\.sh /usr/local/share/agy-sandbox/setup\.sh" "${ROOT_DIR}/base/Dockerfile"; then
+    log_pass "base/Dockerfile: setup.sh copied to protected system directory (/usr/local/share/agy-sandbox/setup.sh)."
+  else
+    log_fail "base/Dockerfile: setup.sh not copied to /usr/local/share/agy-sandbox/setup.sh."
+  fi
+
+  # 5. Patcher pre-cloned in system directory
+  if grep -q "/usr/local/share/agy-sandbox/patcher" "${ROOT_DIR}/base/Dockerfile"; then
+    log_pass "base/Dockerfile: Patcher pre-cloned into system directory (/usr/local/share/agy-sandbox/patcher)."
+  else
+    log_fail "base/Dockerfile: Patcher not pre-cloned at image build time."
+  fi
+else
+  log_info "base/Dockerfile not found at ${ROOT_DIR}/base/Dockerfile. Skipping Dockerfile audit."
+fi
+
+# Check base/install-agy.sh
+if [ -f "${ROOT_DIR}/base/install-agy.sh" ]; then
+  if grep -E 'PATCHER_COMMIT=.*[a-f0-9]{40}' "${ROOT_DIR}/base/install-agy.sh" >/dev/null 2>&1; then
+    log_pass "base/install-agy.sh: Patcher commit pinned with immutable SHA."
+  else
+    log_warn "base/install-agy.sh: Patcher commit SHA pinning not found."
+  fi
+fi
+
+# Check base/setup.sh
+if [ -f "${ROOT_DIR}/base/setup.sh" ]; then
+  # 1. No runtime git clone
+  if grep -q "git clone" "${ROOT_DIR}/base/setup.sh"; then
+    log_fail "base/setup.sh: Found runtime 'git clone' (must use pre-baked patcher in /usr/local/share/agy-sandbox/patcher)."
+  else
+    log_pass "base/setup.sh: No runtime 'git clone' detected (offline safe)."
+  fi
+
+  # 2. No wildcard safe.directory "*"
+  if grep -q 'safe\.directory "\*"' "${ROOT_DIR}/base/setup.sh"; then
+    log_fail "base/setup.sh: Insecure wildcard 'safe.directory \"*\"' detected."
+  else
+    log_pass "base/setup.sh: Insecure wildcard 'safe.directory \"*\"' not present."
+  fi
+
+  # 3. Clean forwarded sockets
+  if grep -q "rm -f /tmp/vscode-git-\*\.sock /tmp/vscode-ssh-auth-\*\.sock" "${ROOT_DIR}/base/setup.sh"; then
+    log_pass "base/setup.sh: Forwarded host authentication socket cleanup routine present."
+  else
+    log_warn "base/setup.sh: Forwarded socket cleanup routine missing."
+  fi
+
+  # 4. Safe git directory support for worktrees (FEAT-01)
+  if grep -q "gitdir" "${ROOT_DIR}/base/setup.sh"; then
+    log_pass "base/setup.sh: Git worktree safe.directory registration logic present (FEAT-01)."
+  else
+    log_fail "base/setup.sh: Missing worktree gitdir resolution in safe.directory setup."
+  fi
+fi
+echo ""
+
+# --------------------------------------------------------
+# 7. Dev Container Specification & Runtime Hardening (F1, F2, F8, F14, F15, F17)
+# --------------------------------------------------------
+echo -e "${CLR_BOLD}[7/8] Dev Container Specification & Runtime Hardening (F1, F2, F8, F14, F15, F17)${CLR_RESET}"
+
+DEV_JSON="${ROOT_DIR}/base/devcontainer.json"
+if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
+  # 1. Credential & secret leak prevention (F1)
+  if jq -e '.customizations.vscode.settings["dev.containers.copyGitConfig"] == false and
+            .customizations.vscode.settings["dev.containers.dockerCredentialHelper"] == false and
+            .customizations.vscode.settings["git.terminalAuthentication"] == false and
+            .customizations.vscode.settings["github.gitAuthentication"] == false' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: All 4 credential leak prevention flags active in vscode settings (F1)."
+  else
+    log_fail "base/devcontainer.json: Missing one or more credential blocking flags in customizations.vscode.settings."
+  fi
+
+  # 2. remoteEnv channel neutralization (F1)
+  if jq -e '.remoteEnv.SSH_AUTH_SOCK == "" and
+            .remoteEnv.VSCODE_GIT_IPC_HANDLE == "" and
+            .remoteEnv.VSCODE_GIT_ASKPASS_NODE == "" and
+            .remoteEnv.VSCODE_GIT_ASKPASS_MAIN == "" and
+            .remoteEnv.GIT_ASKPASS == "/bin/false" and
+            .remoteEnv.SSH_ASKPASS == "/bin/false"' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Host IPC and Askpass channels neutralized in remoteEnv (F1)."
+  else
+    log_fail "base/devcontainer.json: remoteEnv missing IPC/Askpass neutralization variables (F1 risk!)."
+  fi
+
+  # 3. Fail-Closed initializeCommand (F2)
+  init_cmd=$(jq -r '.initializeCommand // empty' "${DEV_JSON}")
+  if [[ "${init_cmd}" =~ /run/agy-sandbox/network.ready ]] && [[ "${init_cmd}" =~ ip[[:space:]]+rule ]]; then
+    log_pass "base/devcontainer.json: Fail-Closed initializeCommand validates readiness marker and RPDB rules (F2)."
+  else
+    log_fail "base/devcontainer.json: Missing or incomplete Fail-Closed initializeCommand (F2 risk!)."
+  fi
+
+  # 4. runArgs security flags & limits (CNT-01, NET-05, F8, F15)
+  run_args=$(jq -r '.runArgs[]?' "${DEV_JSON}")
+  args_ok=true
+  for req in "--security-opt=no-new-privileges:true" \
+             "--cap-drop=NET_RAW" \
+             "--pids-limit=${PIDS_LIMIT}" \
+             "--memory=${MEMORY_LIMIT}" \
+             "--cpus=${CPUS_LIMIT}" \
+             "--tmpfs=/tmp:rw,nosuid,nodev,size=${TMPFS_SIZE},mode=1777" \
+             "--dns=${DNS_PRIMARY}" \
+             "--dns=${DNS_SECONDARY}"; do
+    if ! echo "${run_args}" | grep -F -- "${req}" >/dev/null 2>&1; then
+      log_fail "base/devcontainer.json: runArgs missing required security argument: ${req}"
+      args_ok=false
+    fi
+  done
+  if [ "${args_ok}" = "true" ]; then
+    log_pass "base/devcontainer.json: All runArgs security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
+  fi
+
+  # 5. mounts project isolation & readonly .devcontainer (CNT-02, F14, F17)
+  mounts_str=$(jq -r '.mounts[]?' "${DEV_JSON}")
+  if echo "${mounts_str}" | grep -E "source=agy-gemini-data-\\\$\{localWorkspaceFolderBasename\}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Project-isolated state volume configured (agy-gemini-data-\${localWorkspaceFolderBasename}, F14)."
+  else
+    log_fail "base/devcontainer.json: Missing project-scoped state volume in mounts (F14)."
+  fi
+
+  if echo "${mounts_str}" | grep -E "\.devcontainer.*readonly" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: .devcontainer mounted as Read-Only to prevent in-container host breakout (F17)."
+  else
+    log_fail "base/devcontainer.json: Missing readonly bind mount for .devcontainer (F17 risk!)."
+  fi
+
+  # 6. postStartCommand socket and credentials cleanup
+  if jq -e '.postStartCommand | (contains("vscode-git-*.sock") and contains("vscode-ssh-auth-*.sock") and contains(".gitconfig"))' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: postStartCommand cleans forwarded sockets and copied git credentials on startup."
+  else
+    log_warn "base/devcontainer.json: postStartCommand socket/credential cleanup routine missing or incomplete."
+  fi
+
+  # 7. init-sandbox.sh worktree and mount flags support (FEAT-01, FEAT-02)
+  if [ -f "${ROOT_DIR}/scripts/init-sandbox.sh" ]; then
+    if grep -q -- "--worktree" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q -- "--mount" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: CLI supports isolated Git worktree (--worktree) and custom bind mounts (--mount)."
+    else
+      log_fail "scripts/init-sandbox.sh: Missing --worktree or --mount flag support."
+    fi
+  fi
+else
+  log_info "base/devcontainer.json not found or jq unavailable. Skipping static devcontainer audit."
+fi
+echo ""
+
+# --------------------------------------------------------
+# 8. Container Boundary Verification
+# --------------------------------------------------------
+echo -e "${CLR_BOLD}[8/8] Container Egress Boundary Tests (TCP/HTTP Probes)${CLR_RESET}"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   active_cid=$(docker ps --filter "network=${NETWORK_NAME}" --format '{{.ID}}' 2>/dev/null | head -n1 || echo "")
   if [ -n "${active_cid}" ]; then
     c_name=$(docker ps --filter "id=${active_cid}" --format '{{.Names}}' 2>/dev/null || echo "${active_cid:0:12}")
     log_info "Active container detected on '${NETWORK_NAME}': ${c_name} (${active_cid:0:12})"
+
+    # Verify protected system paths inside live container
+    if docker exec "${active_cid}" test -f /usr/local/share/agy-sandbox/setup.sh 2>/dev/null; then
+      s_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /usr/local/share/agy-sandbox/setup.sh 2>/dev/null || echo "unknown")
+      if [ "${s_owner}" = "root:root" ]; then
+        log_pass "Container: /usr/local/share/agy-sandbox/setup.sh is owned by root:root."
+      else
+        log_fail "Container: /usr/local/share/agy-sandbox/setup.sh owned by '${s_owner}' (expected root:root)."
+      fi
+    fi
+
+    if docker exec "${active_cid}" test -d /usr/local/share/agy-sandbox/patcher 2>/dev/null; then
+      p_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /usr/local/share/agy-sandbox/patcher 2>/dev/null || echo "unknown")
+      if [ "${p_owner}" = "root:root" ]; then
+        log_pass "Container: /usr/local/share/agy-sandbox/patcher is owned by root:root."
+      else
+        log_fail "Container: /usr/local/share/agy-sandbox/patcher owned by '${p_owner}' (expected root:root)."
+      fi
+    fi
+
+    # Stage 3 Live container inspection (docker inspect)
+    c_inspect=$(docker inspect "${active_cid}" 2>/dev/null || echo "[]")
+    if [ "${c_inspect}" != "[]" ]; then
+      if echo "${c_inspect}" | jq -e '.[0].HostConfig.SecurityOpt | index("no-new-privileges:true")' >/dev/null 2>&1; then
+        log_pass "Container: HostConfig.SecurityOpt contains 'no-new-privileges:true'."
+      else
+        log_warn "Container: HostConfig.SecurityOpt missing 'no-new-privileges:true'."
+      fi
+
+      if echo "${c_inspect}" | jq -e '.[0].HostConfig.CapDrop | index("NET_RAW")' >/dev/null 2>&1; then
+        log_pass "Container: HostConfig.CapDrop drops NET_RAW."
+      else
+        log_warn "Container: HostConfig.CapDrop does not contain NET_RAW."
+      fi
+
+      pids_lim=$(echo "${c_inspect}" | jq -r '.[0].HostConfig.PidsLimit // 0' 2>/dev/null || echo "0")
+      if [ "${pids_lim}" -gt 0 ]; then
+        log_pass "Container: HostConfig.PidsLimit enforced (${pids_lim})."
+      else
+        log_warn "Container: HostConfig.PidsLimit not enforced (${pids_lim})."
+      fi
+
+      devcont_ro=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | endswith("/.devcontainer")) | .RW' 2>/dev/null || echo "")
+      if [ "${devcont_ro}" = "false" ]; then
+        log_pass "Container: .devcontainer mount is strictly Read-Only (RW: false)."
+      elif [ "${devcont_ro}" = "true" ]; then
+        log_fail "Container: .devcontainer mount is writable (RW: true, F17 risk!)."
+      else
+        log_info "Container: .devcontainer dedicated mount not detected in container Mounts."
+      fi
+
+      # Stage 4 Git Worktree mounts protection (FEAT-01)
+      has_git_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | test("/\\.git(/.*)?$")) | .Destination' 2>/dev/null | head -n1 || echo "")
+      if [ -n "${has_git_mount}" ]; then
+        log_info "Container: Git worktree bind mounts detected. Auditing Git metadata protections..."
+        for sub in "hooks" "config" "info"; do
+          sub_rw=$(echo "${c_inspect}" | jq -r --arg s "/.git/${sub}" '.[0].Mounts[]? | select(.Destination | endswith($s)) | .RW' 2>/dev/null || echo "")
+          if [ "${sub_rw}" = "false" ]; then
+            log_pass "Container: .git/${sub} mount is strictly Read-Only (RW: false, FEAT-01)."
+          elif [ "${sub_rw}" = "true" ]; then
+            log_fail "Container: .git/${sub} mount is WRITABLE (RW: true, host RCE risk!)."
+          else
+            log_warn "Container: .git/${sub} dedicated Read-Only mount not detected in container Mounts."
+          fi
+        done
+      fi
+    fi
+
     gw_ip=$(echo "${ACTIVE_SUBNET}" | sed -E 's/\.[0-9]+\/[0-9]+$/\.1/')
     audit_egress_isolation "docker exec ${active_cid}" "${gw_ip}"
   else
