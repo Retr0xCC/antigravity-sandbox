@@ -7,9 +7,11 @@ set -euo pipefail
 # releases of the Antigravity CLI from GitHub Releases.
 # ========================================================
 
-GITHUB_REPO="google-antigravity/antigravity-cli"
+GITHUB_REPO="${GITHUB_REPO:-google-antigravity/antigravity-cli}"
+GITHUB_BASE_URL="${GITHUB_BASE_URL:-https://github.com}"
 TARGET_DIR="${TARGET_DIR:-${HOME}/.local/bin}"
 VERSION="${AGY_VERSION:-}"
+AGY_CACHE_DIR="${AGY_CACHE_DIR:-${HOME}/.cache/agy-downloads}"
 
 # Antigravity eligibility patcher (QNIX-Dev) supply chain pinning (SEC-03)
 PATCHER_REPO="${PATCHER_REPO:-https://github.com/QNIX-Dev/eligibility-antigravity-patcher.git}"
@@ -35,6 +37,7 @@ Options:
 Environment Variables:
   AGY_VERSION         Target version to install
   TARGET_DIR          Destination directory
+  AGY_CACHE_DIR       Shared archive cache directory
 EOF
 }
 
@@ -142,6 +145,7 @@ echo "==> [install-agy] Target platform: ${PLATFORM_OS}_${PLATFORM_ARCH}${LIBC_S
 echo "==> [install-agy] Installation directory: ${TARGET_DIR}"
 
 mkdir -p "${TARGET_DIR}"
+mkdir -p "${AGY_CACHE_DIR}" 2>/dev/null || true
 
 # Handle 'latest' installation
 if [ "${VERSION}" = "latest" ]; then
@@ -156,15 +160,25 @@ if [ "${VERSION}" = "latest" ]; then
   if [ "$installed_via_script" = false ]; then
     echo "==> [install-agy] Official installer unavailable, falling back to GitHub Releases latest download..."
     TMP_DIR="$(mktemp -d /tmp/agy-install.XXXXXX)"
-    trap 'rm -rf "${TMP_DIR}"' EXIT
+    LATEST_CACHE="${AGY_CACHE_DIR}/latest_${ASSET_NAME}"
+    trap 'rm -rf "${TMP_DIR}"; rm -f "${LATEST_CACHE}.tmp.$$" 2>/dev/null || true' EXIT
 
-    LATEST_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${ASSET_NAME}"
-    if ! curl -fSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${ASSET_NAME}" "${LATEST_URL}"; then
-      echo "Fatal: Failed to download latest release asset from ${LATEST_URL}." >&2
+    LATEST_URL="${GITHUB_BASE_URL:-https://github.com}/${GITHUB_REPO}/releases/latest/download/${ASSET_NAME}"
+    TEMP_DOWNLOAD="${LATEST_CACHE}.tmp.$$"
+
+    # Default: skip caching for latest to ensure freshness, but allow fallback if offline
+    if curl -fSL --retry 3 --retry-delay 2 -o "${TEMP_DOWNLOAD}" "${LATEST_URL}" 2>/dev/null && [ -s "${TEMP_DOWNLOAD}" ] && tar -tzf "${TEMP_DOWNLOAD}" >/dev/null 2>&1; then
+      mv -f "${TEMP_DOWNLOAD}" "${LATEST_CACHE}"
+      tar -xzf "${LATEST_CACHE}" -C "${TMP_DIR}"
+    elif [ -f "${LATEST_CACHE}" ] && [ -s "${LATEST_CACHE}" ] && tar -tzf "${LATEST_CACHE}" >/dev/null 2>&1; then
+      echo "==> [install-agy] Network unavailable. Found valid cached latest asset: ${LATEST_CACHE}. Falling back to cache."
+      tar -xzf "${LATEST_CACHE}" -C "${TMP_DIR}"
+    else
+      rm -f "${TEMP_DOWNLOAD}" 2>/dev/null || true
+      echo "Fatal: Failed to download latest release asset from ${LATEST_URL} and no valid cache found." >&2
       exit 1
     fi
 
-    tar -xzf "${TMP_DIR}/${ASSET_NAME}" -C "${TMP_DIR}"
     if [ -f "${TMP_DIR}/antigravity" ]; then
       SRC_BIN="${TMP_DIR}/antigravity"
     else
@@ -183,30 +197,58 @@ if [ "${VERSION}" = "latest" ]; then
 else
   # Specific version pinned
   TMP_DIR="$(mktemp -d /tmp/agy-install.XXXXXX)"
-  trap 'rm -rf "${TMP_DIR}"' EXIT
+  CACHED_ASSET="${AGY_CACHE_DIR}/${VERSION}_${ASSET_NAME}"
+  trap 'rm -rf "${TMP_DIR}"; rm -f "${CACHED_ASSET}.tmp.$$" 2>/dev/null || true' EXIT
 
   CLEAN_TAG="${VERSION#v}"
-  CANDIDATE_TAGS=("${CLEAN_TAG}" "v${CLEAN_TAG}")
-  downloaded=false
+  if [ ! -f "${CACHED_ASSET}" ] && [ -f "${AGY_CACHE_DIR}/${CLEAN_TAG}_${ASSET_NAME}" ]; then
+    CACHED_ASSET="${AGY_CACHE_DIR}/${CLEAN_TAG}_${ASSET_NAME}"
+  fi
 
-  for tag in "${CANDIDATE_TAGS[@]}"; do
-    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${ASSET_NAME}"
-    echo "==> [install-agy] Downloading release asset from ${DOWNLOAD_URL}..."
-    if curl -fSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${ASSET_NAME}" "${DOWNLOAD_URL}" 2>/dev/null; then
-      downloaded=true
-      break
+  cached_valid=false
+  if [ -f "${CACHED_ASSET}" ] && [ -s "${CACHED_ASSET}" ]; then
+    if tar -tzf "${CACHED_ASSET}" >/dev/null 2>&1; then
+      cached_valid=true
+    else
+      echo "==> [install-agy] Warning: Corrupted cache detected for ${CACHED_ASSET}. Re-downloading..."
+      rm -f "${CACHED_ASSET}" 2>/dev/null || true
     fi
-  done
+  fi
 
-  if [ "$downloaded" = false ]; then
-    echo "Fatal: Failed to download release asset for version '${VERSION}'." >&2
-    echo "       Target URL: https://github.com/${GITHUB_REPO}/releases/download/${CLEAN_TAG}/${ASSET_NAME}" >&2
-    echo "       Please verify that version '${VERSION}' exists at: https://github.com/${GITHUB_REPO}/releases" >&2
-    exit 1
+  if [ "${cached_valid}" = "true" ]; then
+    echo "==> [install-agy] Found valid cached asset: ${CACHED_ASSET}. Skipping download."
+  else
+    CANDIDATE_TAGS=("${CLEAN_TAG}" "v${CLEAN_TAG}")
+    downloaded=false
+
+    for tag in "${CANDIDATE_TAGS[@]}"; do
+      DOWNLOAD_URL="${GITHUB_BASE_URL:-https://github.com}/${GITHUB_REPO}/releases/download/${tag}/${ASSET_NAME}"
+      echo "==> [install-agy] Downloading release asset from ${DOWNLOAD_URL}..."
+      TEMP_DOWNLOAD="${CACHED_ASSET}.tmp.$$"
+      rm -f "${TEMP_DOWNLOAD}" 2>/dev/null || true
+      if curl -fSL --retry 3 --retry-delay 2 -o "${TEMP_DOWNLOAD}" "${DOWNLOAD_URL}" 2>/dev/null; then
+        if [ -s "${TEMP_DOWNLOAD}" ] && tar -tzf "${TEMP_DOWNLOAD}" >/dev/null 2>&1; then
+          mv -f "${TEMP_DOWNLOAD}" "${CACHED_ASSET}"
+          downloaded=true
+          break
+        else
+          rm -f "${TEMP_DOWNLOAD}" 2>/dev/null || true
+        fi
+      else
+        rm -f "${TEMP_DOWNLOAD}" 2>/dev/null || true
+      fi
+    done
+
+    if [ "$downloaded" = false ]; then
+      echo "Fatal: Failed to download release asset for version '${VERSION}'." >&2
+      echo "       Target URL: https://github.com/${GITHUB_REPO}/releases/download/${CLEAN_TAG}/${ASSET_NAME}" >&2
+      echo "       Please verify that version '${VERSION}' exists at: https://github.com/${GITHUB_REPO}/releases" >&2
+      exit 1
+    fi
   fi
 
   echo "==> [install-agy] Extracting ${ASSET_NAME}..."
-  tar -xzf "${TMP_DIR}/${ASSET_NAME}" -C "${TMP_DIR}"
+  tar -xzf "${CACHED_ASSET}" -C "${TMP_DIR}"
 
   if [ -f "${TMP_DIR}/antigravity" ]; then
     SRC_BIN="${TMP_DIR}/antigravity"

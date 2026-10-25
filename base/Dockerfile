@@ -35,9 +35,10 @@ COPY --chown=root:root setup.sh /usr/local/share/agy-sandbox/setup.sh
 COPY --chown=root:root install-agy.sh /usr/local/share/agy-sandbox/install-agy.sh
 RUN chmod 0755 /usr/local/share/agy-sandbox/setup.sh /usr/local/share/agy-sandbox/install-agy.sh
 
-# Pre-create directories for persisted Gemini volumes with unprivileged ownership (no-new-privileges preparation)
-RUN mkdir -p /home/vscode/.gemini /home/vscode/.gemini-shared \
-    && chown -R vscode:vscode /home/vscode/.gemini /home/vscode/.gemini-shared \
+# Pre-create directories for persisted Gemini and cache volumes with unprivileged ownership (no-new-privileges preparation)
+RUN mkdir -p /home/vscode/.gemini /home/vscode/.gemini-shared /home/vscode/.cache \
+    && chown -R vscode:vscode /home/vscode/.gemini /home/vscode/.gemini-shared /home/vscode/.cache \
+    && chmod 0755 /home/vscode/.cache \
     && chmod 0700 /home/vscode/.gemini /home/vscode/.gemini-shared
 
 # Configure unprivileged vscode user
