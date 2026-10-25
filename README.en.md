@@ -70,6 +70,7 @@ Before deploying Antigravity Sandbox, ensure your host meets the following prere
  │   - Isolated workspace: /workspaces/<proj>                  │
  │   - Decoupled state volumes:                                │
  │       agy-shared-config ──► /home/vscode/.gemini-shared     │
+ │       agy-shared-cache  ──► /home/vscode/.cache             │
  │       agy-gemini-data   ──► /home/vscode/.gemini            │
  └───────────────────────────────┬─────────────────────────────┘
                                  │
@@ -101,7 +102,7 @@ Before deploying Antigravity Sandbox, ensure your host meets the following prere
 - **Isolated dual DNS (`9.9.9.9`, `149.112.112.112`):** Queries resolve directly through Quad9 upstream resolvers bypassing the host resolver, preventing DNS leaks and local host scanning via NetBIOS/mDNS.
 - **Dropped network & system privileges:** The container runs with `--security-opt=no-new-privileges:true` and drops `CAP_NET_RAW` capability, preventing raw socket manipulation, ICMP packet craft, ARP spoofing, or modifying internal network tables.
 - **Binary modification protection:** For pinned CLI versions (`AGY_VERSION != latest`), permissions on the `agy` binary are fixed to read and execute (`chmod 555`), and auto-update is blocked via `AGY_CLI_DISABLE_AUTO_UPDATE=1`. When running with `latest`, standard executable permissions (`chmod 755`) are preserved and self-updates remain active.
-- **Decoupled persistent volume storage:** Global shared configuration (auth credentials, settings, installation ID, MCP config) is preserved in a shared Docker volume (`agy-shared-config -> /home/vscode/.gemini-shared`), preventing repetitive logins across projects. Project-isolated context (conversations, brain graph, local databases, and caches) remains in a project-scoped volume (`agy-gemini-data-${localWorkspaceFolderBasename} -> /home/vscode/.gemini`). `setup.sh` seamlessly links shared configurations at runtime.
+- **Decoupled persistent volume storage & package caching:** Global shared configuration (auth credentials, settings, installation ID, MCP config) is preserved in a shared Docker volume (`agy-shared-config -> /home/vscode/.gemini-shared`), preventing repetitive logins across projects. Shared asset and wheel caching is managed via (`agy-shared-cache -> /home/vscode/.cache`), eliminating redundant PyPI/GitHub downloads for `uv` and `install-agy.sh`. Project-isolated context (conversations, brain graph, local databases, and caches) remains in a project-scoped volume (`agy-gemini-data-${localWorkspaceFolderBasename} -> /home/vscode/.gemini`). `setup.sh` seamlessly links shared configurations at runtime.
 - **Protected `.devcontainer` configuration:** The `.devcontainer` directory is mounted read-only (`type=bind,readonly`) inside the container, preventing an in-container agent from tampering with container lifecycle scripts or `devcontainer.json`.
 
 ---
