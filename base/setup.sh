@@ -9,11 +9,50 @@ set -e
 MARKER_FILE="/home/vscode/.agy_initialized"
 WORKSPACE_DIR="${1:-${CONTAINER_WORKSPACE_FOLDER:-$(pwd)}}"
 
-# Verify permissions on persisted volume without requiring sudo (no-new-privileges safe)
-if [ -d "/home/vscode/.gemini" ] && [ ! -w "/home/vscode/.gemini" ]; then
-    echo "==> [antigravity-sandbox] Warning: /home/vscode/.gemini is not writable. Attempting non-interactive permissions fix..."
-    sudo -n chown -R vscode:vscode /home/vscode/.gemini 2>/dev/null || true
-fi
+# Verify permissions on persisted volumes without requiring sudo (no-new-privileges safe)
+for vol in "/home/vscode/.gemini" "/home/vscode/.gemini-shared"; do
+    if [ -d "${vol}" ] && [ ! -w "${vol}" ]; then
+        echo "==> [antigravity-sandbox] Warning: ${vol} is not writable. Attempting non-interactive permissions fix..."
+        sudo -n chown -R vscode:vscode "${vol}" 2>/dev/null || true
+    fi
+done
+
+# Orchestrate shared configuration symlinks between .gemini-shared and .gemini
+mkdir -p /home/vscode/.gemini/antigravity-cli /home/vscode/.gemini/config
+mkdir -p /home/vscode/.gemini-shared/antigravity-cli /home/vscode/.gemini-shared/config
+
+SHARED_CONFIG_FILES=(
+    "antigravity-cli/installation_id"
+    "antigravity-cli/settings.json"
+    "antigravity-cli/jetski_state.pbtxt"
+    "antigravity-cli/last_check.timestamp"
+    "config/mcp_config.json"
+    "config/.migrated"
+)
+
+for rel_path in "${SHARED_CONFIG_FILES[@]}"; do
+    gemini_path="/home/vscode/.gemini/${rel_path}"
+    shared_path="/home/vscode/.gemini-shared/${rel_path}"
+
+    # If the file exists in .gemini as a regular file and NOT in .gemini-shared, migrate it
+    if [ -f "${gemini_path}" ] && [ ! -L "${gemini_path}" ]; then
+        if [ ! -e "${shared_path}" ]; then
+            echo "==> [antigravity-sandbox] Migrating ${rel_path} to shared volume..."
+            mv "${gemini_path}" "${shared_path}"
+        else
+            rm -f "${gemini_path}"
+        fi
+    fi
+
+    # If the target in .gemini is a broken symlink, missing, or not pointing to shared_path
+    if [ -L "${gemini_path}" ]; then
+        if [ "$(readlink "${gemini_path}")" != "${shared_path}" ]; then
+            ln -sf "${shared_path}" "${gemini_path}"
+        fi
+    elif [ ! -e "${gemini_path}" ]; then
+        ln -sf "${shared_path}" "${gemini_path}"
+    fi
+done
 
 # Exit early if already initialized
 if [ -f "${MARKER_FILE}" ]; then

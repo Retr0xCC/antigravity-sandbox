@@ -150,6 +150,28 @@ audit_egress_isolation() {
     fi
   fi
 
+  # In-container shared volume and symlink verification
+  if [ -z "${exec_prefix}" ] && [ -d /home/vscode/.gemini-shared ]; then
+    local sh_owner
+    sh_owner=$(stat -c "%U:%G" /home/vscode/.gemini-shared 2>/dev/null || echo "unknown")
+    if [ "${sh_owner}" = "vscode:vscode" ]; then
+      log_pass "Container: /home/vscode/.gemini-shared exists and is owned by vscode:vscode."
+    fi
+    local symlinks_ok=true
+    for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
+      local link_target
+      link_target=$(readlink "/home/vscode/.gemini/${s_file}" 2>/dev/null || echo "")
+      if [ "${link_target}" = "/home/vscode/.gemini-shared/${s_file}" ]; then
+        :
+      else
+        symlinks_ok=false
+      fi
+    done
+    if [ "${symlinks_ok}" = "true" ]; then
+      log_pass "Container: Shared configuration symlinks properly link .gemini to .gemini-shared."
+    fi
+  fi
+
   # 1. Gateway host probe
   local gw_blocked=true
   for port in 22 80 2375 53; do
@@ -495,11 +517,13 @@ if [ -f "${ROOT_DIR}/base/Dockerfile" ]; then
     log_fail "base/Dockerfile: Antigravity CLI patcher commit is not pinned to a 40-character SHA."
   fi
 
-  # 3. Pre-creation of /home/vscode/.gemini
-  if grep -q "/home/vscode/\.gemini" "${ROOT_DIR}/base/Dockerfile" && grep -q "chown -R vscode:vscode /home/vscode/\.gemini" "${ROOT_DIR}/base/Dockerfile"; then
-    log_pass "base/Dockerfile: /home/vscode/.gemini pre-created with unprivileged ownership (vscode:vscode, 0700)."
+  # 3. Pre-creation of /home/vscode/.gemini and /home/vscode/.gemini-shared
+  if grep -q "/home/vscode/\.gemini" "${ROOT_DIR}/base/Dockerfile" && \
+     grep -q "/home/vscode/\.gemini-shared" "${ROOT_DIR}/base/Dockerfile" && \
+     grep -E "chown -R vscode:vscode.*\.gemini.*\.gemini-shared" "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
+    log_pass "base/Dockerfile: /home/vscode/.gemini and /home/vscode/.gemini-shared pre-created with unprivileged ownership (vscode:vscode, 0700)."
   else
-    log_warn "base/Dockerfile: /home/vscode/.gemini pre-creation with unprivileged ownership not detected."
+    log_warn "base/Dockerfile: /home/vscode/.gemini and /home/vscode/.gemini-shared pre-creation with unprivileged ownership not detected."
   fi
 
   # 4. setup.sh copied to /usr/local/share/agy-sandbox/setup.sh
@@ -631,8 +655,14 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: All runArgs/capDrop security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
   fi
 
-  # 5. mounts project isolation & readonly .devcontainer (CNT-02, F14, F17)
+  # 5. mounts shared config, project isolation & readonly .devcontainer (CNT-02, F14, F17)
   mounts_str=$(jq -r '.mounts[]?' "${DEV_JSON}")
+  if echo "${mounts_str}" | grep -E "source=agy-shared-config,target=/home/vscode/\.gemini-shared" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Shared global configuration volume configured (agy-shared-config)."
+  else
+    log_fail "base/devcontainer.json: Missing shared configuration volume in mounts (agy-shared-config)."
+  fi
+
   if echo "${mounts_str}" | grep -E "source=agy-gemini-data-\\\$\{localWorkspaceFolderBasename\}" >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: Project-isolated state volume configured (agy-gemini-data-\${localWorkspaceFolderBasename}, F14)."
   else
@@ -692,6 +722,33 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       else
         log_fail "Container: /usr/local/share/agy-sandbox/patcher owned by '${p_owner}' (expected root:root)."
       fi
+    fi
+
+    # Verify /home/vscode/.gemini-shared volume and ownership in live container
+    if docker exec "${active_cid}" test -d /home/vscode/.gemini-shared 2>/dev/null; then
+      sh_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /home/vscode/.gemini-shared 2>/dev/null || echo "unknown")
+      if [ "${sh_owner}" = "vscode:vscode" ]; then
+        log_pass "Container: /home/vscode/.gemini-shared exists and is owned by vscode:vscode."
+      else
+        log_fail "Container: /home/vscode/.gemini-shared owned by '${sh_owner}' (expected vscode:vscode)."
+      fi
+
+      # Verify shared configuration symlinks
+      local symlinks_ok=true
+      for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
+        target_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/${s_file}" 2>/dev/null || echo "")
+        if [ "${target_link}" = "/home/vscode/.gemini-shared/${s_file}" ]; then
+          :
+        else
+          symlinks_ok=false
+          log_warn "Container: Symlink for ${s_file} missing or points to '${target_link}' (expected /home/vscode/.gemini-shared/${s_file})."
+        fi
+      done
+      if [ "${symlinks_ok}" = "true" ]; then
+        log_pass "Container: Shared configuration symlinks properly link .gemini to .gemini-shared."
+      fi
+    else
+      log_warn "Container: /home/vscode/.gemini-shared directory missing."
     fi
 
     # Stage 3 Live container inspection (docker inspect)
