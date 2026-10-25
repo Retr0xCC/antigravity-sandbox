@@ -18,14 +18,34 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Save any explicit caller environment overrides before sourcing sandbox.conf
+_ENV_NET="${NETWORK_NAME:-}"
+_ENV_BR="${BRIDGE_NAME:-}"
+_ENV_SUBNET="${SUBNET:-}"
+_ENV_DNS1="${DNS_PRIMARY:-}"
+_ENV_DNS2="${DNS_SECONDARY:-}"
+_ENV_READY="${READY_FILE:-}"
+_ENV_PIDS="${PIDS_LIMIT:-}"
+_ENV_MEM="${MEMORY_LIMIT:-}"
+_ENV_CPUS="${CPUS_LIMIT:-}"
+_ENV_TMPFS="${TMPFS_SIZE:-}"
+
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/sandbox.conf"
 fi
 
-NETWORK_NAME="${NETWORK_NAME:-agy_net}"
-BRIDGE_NAME="${BRIDGE_NAME:-agy0}"
-READY_FILE="${READY_FILE:-/run/agy-sandbox/network.ready}"
+# Apply environment variable overrides if explicitly provided
+[ -n "${_ENV_NET}" ] && NETWORK_NAME="${_ENV_NET}"
+[ -n "${_ENV_BR}" ] && BRIDGE_NAME="${_ENV_BR}"
+[ -n "${_ENV_SUBNET}" ] && SUBNET="${_ENV_SUBNET}"
+[ -n "${_ENV_DNS1}" ] && DNS_PRIMARY="${_ENV_DNS1}"
+[ -n "${_ENV_DNS2}" ] && DNS_SECONDARY="${_ENV_DNS2}"
+[ -n "${_ENV_READY}" ] && READY_FILE="${_ENV_READY}"
+[ -n "${_ENV_PIDS}" ] && PIDS_LIMIT="${_ENV_PIDS}"
+[ -n "${_ENV_MEM}" ] && MEMORY_LIMIT="${_ENV_MEM}"
+[ -n "${_ENV_CPUS}" ] && CPUS_LIMIT="${_ENV_CPUS}"
+[ -n "${_ENV_TMPFS}" ] && TMPFS_SIZE="${_ENV_TMPFS}"
 
 # Antigravity CLI Defaults derived directly from base/devcontainer.json
 BASE_DEVCONTAINER="${ROOT_DIR}/base/devcontainer.json"
@@ -164,6 +184,7 @@ assemble_devcontainer_json() {
   local output_file="$4"
   local agy_version="${5:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
   local agy_patch="${6:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
+  local extra_mounts_json="${7:-[]}"
 
   local display_name="${template_name}"
   if [ "${template_name}" = "default" ]; then
@@ -186,21 +207,70 @@ assemble_devcontainer_json() {
       exts_json=$(printf '%s\n' "${exts[@]}" | jq -R . | jq -s .)
     fi
 
-    local settings_json="{}"
+    local base_settings="{}"
+    base_settings=$(jq ".customizations.vscode.settings // {}" "${base_json}")
+
+    local tmpl_settings="{}"
     if [ -f "${template_dir}/settings.json" ]; then
-      settings_json=$(jq . "${template_dir}/settings.json")
-    else
-      settings_json=$(jq ".customizations.vscode.settings" "${base_json}")
+      tmpl_settings=$(jq . "${template_dir}/settings.json")
     fi
 
+    # Initialize fail-closed host check command synchronized with sandbox.conf
+    local ready_path="${READY_FILE}"
+    local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
+
+    # Enforce security settings with highest precedence over template
     # shellcheck disable=SC2016
-    local jq_filter='.name = $name | .customizations.vscode.extensions = $exts | .customizations.vscode.settings = $settings | .build.args.AGY_VERSION = $ver | .remoteEnv.AGY_VERSION = $ver | .remoteEnv.AGY_PATCH = $patch | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE) | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)'
+    local jq_filter='
+      .name = $name
+      | .customizations.vscode.extensions = $exts
+      | .customizations.vscode.settings = (($base_settings * $tmpl_settings) * {
+          "dev.containers.copyGitConfig": false,
+          "dev.containers.dockerCredentialHelper": false,
+          "git.terminalAuthentication": false,
+          "github.gitAuthentication": false,
+          "git.autofetch": false
+        })
+      | .runArgs = [
+          "--network=" + $net,
+          "--dns=" + $dns1,
+          "--dns=" + $dns2,
+          "--pids-limit=" + $pids,
+          "--memory=" + $mem,
+          "--cpus=" + $cpus,
+          "--tmpfs=/tmp:rw,nosuid,nodev,size=" + $tmpfs + ",mode=1777"
+        ] + (.runArgs | map(select((
+            startswith("--network=") or
+            startswith("--dns=") or
+            startswith("--pids-limit=") or
+            startswith("--memory=") or
+            startswith("--cpus=") or
+            startswith("--tmpfs=/tmp:")
+          ) | not)))
+      | .mounts = ((.mounts // []) as $m | $m + ($extra_mounts | map(. as $x | select(($m | index($x)) == null))))
+      | .initializeCommand = $init_cmd
+      | .build.args.AGY_VERSION = $ver
+      | .remoteEnv.AGY_VERSION = $ver
+      | .remoteEnv.AGY_PATCH = $patch
+      | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
+      | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
+    '
 
     jq --arg name "\${localWorkspaceFolderBasename} (${display_name} Sandbox)" \
        --arg ver "${agy_version}" \
        --arg patch "${agy_patch}" \
+       --arg net "${NETWORK_NAME}" \
+       --arg dns1 "${DNS_PRIMARY}" \
+       --arg dns2 "${DNS_SECONDARY}" \
+       --arg pids "${PIDS_LIMIT}" \
+       --arg mem "${MEMORY_LIMIT}" \
+       --arg cpus "${CPUS_LIMIT}" \
+       --arg tmpfs "${TMPFS_SIZE}" \
+       --arg init_cmd "${init_cmd}" \
        --argjson exts "${exts_json}" \
-       --argjson settings "${settings_json}" \
+       --argjson base_settings "${base_settings}" \
+       --argjson tmpl_settings "${tmpl_settings}" \
+       --argjson extra_mounts "${extra_mounts_json}" \
        "${jq_filter}" \
        "${base_json}" > "${output_file}"
   else
@@ -209,6 +279,13 @@ assemble_devcontainer_json() {
     template_content="${template_content//@@TEMPLATE_NAME@@/${display_name}}"
     template_content="${template_content//\"AGY_VERSION\": \"1.4.6\"/\"AGY_VERSION\": \"${agy_version}\"}"
     template_content="${template_content//\"AGY_PATCH\": \"true\"/\"AGY_PATCH\": \"${agy_patch}\"}"
+    template_content="${template_content//\"--network=agy_net\"/\"--network=${NETWORK_NAME}\"}"
+    template_content="${template_content//\"--dns=9.9.9.9\"/\"--dns=${DNS_PRIMARY}\"}"
+    template_content="${template_content//\"--dns=149.112.112.112\"/\"--dns=${DNS_SECONDARY}\"}"
+    template_content="${template_content//\"--pids-limit=2048\"/\"--pids-limit=${PIDS_LIMIT}\"}"
+    template_content="${template_content//\"--memory=8g\"/\"--memory=${MEMORY_LIMIT}\"}"
+    template_content="${template_content//\"--cpus=4\"/\"--cpus=${CPUS_LIMIT}\"}"
+    template_content="${template_content//\"size=2g\"/\"size=${TMPFS_SIZE}\"}"
     echo -e "${template_content}" > "${output_file}"
   fi
 }
@@ -219,6 +296,7 @@ assemble_declarative_template() {
   local dest_dir="$3"
   local agy_version="${4:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
   local agy_patch="${5:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
+  local extra_mounts_json="${6:-[]}"
 
   # 1. Setup hook
   cp "${ROOT_DIR}/base/setup.sh" "${dest_dir}/setup.sh"
@@ -231,7 +309,7 @@ assemble_declarative_template() {
   assemble_dockerfile "${ROOT_DIR}/base/Dockerfile" "${template_name}" "${template_path}" "${dest_dir}/Dockerfile"
 
   # 3. devcontainer.json
-  assemble_devcontainer_json "${ROOT_DIR}/base/devcontainer.json" "${template_name}" "${template_path}" "${dest_dir}/devcontainer.json" "${agy_version}" "${agy_patch}"
+  assemble_devcontainer_json "${ROOT_DIR}/base/devcontainer.json" "${template_name}" "${template_path}" "${dest_dir}/devcontainer.json" "${agy_version}" "${agy_patch}" "${extra_mounts_json}"
 
   # 4. CLI installer
   cp "${ROOT_DIR}/base/install-agy.sh" "${dest_dir}/install-agy.sh"
@@ -284,15 +362,200 @@ expand_path() {
   echo "$p"
 }
 
+validate_and_parse_mount() {
+  local spec="$1"
+  if [ -z "${spec}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Empty mount specification.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  local parts=()
+  IFS=':' read -r -a parts <<< "${spec}"
+
+  local host_raw=""
+  local container_path=""
+  local mode="ro"
+
+  if [ ${#parts[@]} -eq 2 ]; then
+    host_raw="${parts[0]}"
+    container_path="${parts[1]}"
+    mode="ro"
+    echo -e "${CLR_CYAN}==> [antigravity-sandbox] Notice: Mount mode not specified for '${host_raw}', defaulting to Read-Only (:ro)${CLR_RESET}" >&2
+  elif [ ${#parts[@]} -eq 3 ]; then
+    host_raw="${parts[0]}"
+    container_path="${parts[1]}"
+    mode="${parts[2]}"
+  else
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid --mount format '${spec}'. Expected '<host_path>:<container_path>[:ro|rw]'.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  if [ -z "${host_raw}" ] || [ -z "${container_path}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Host or container path in '${spec}' cannot be empty.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  if [ "${mode}" != "ro" ] && [ "${mode}" != "rw" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid mount mode '${mode}' in '${spec}'. Expected 'ro' or 'rw'.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  if [[ "${container_path}" != /* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Container mount path '${container_path}' must be an absolute path (starting with /).${CLR_RESET}" >&2
+    return 1
+  fi
+
+  local host_path
+  host_path="$(expand_path "${host_raw}")"
+  local canonical_host
+  canonical_host="$(realpath -m "${host_path}" 2>/dev/null || echo "${host_path}")"
+
+  # Security Blacklist checks
+  # 1. Root filesystem
+  if [ "${canonical_host}" = "/" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '/' is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # 2. System directories and subdirectories
+  local sys_dirs=("/etc" "/usr" "/var" "/bin" "/sbin" "/lib" "/lib64" "/proc" "/sys" "/dev" "/run" "/root")
+  for s_dir in "${sys_dirs[@]}"; do
+    if [ "${canonical_host}" = "${s_dir}" ] || [[ "${canonical_host}" == "${s_dir}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' (resolves to '${canonical_host}') is in system directory '${s_dir}' and is blacklisted for security reasons!${CLR_RESET}" >&2
+      return 1
+    fi
+  done
+
+  # Docker sockets
+  if [ "${canonical_host}" = "/var/run/docker.sock" ] || [ "${canonical_host}" = "/run/docker.sock" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a Docker socket and is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # 3. User Home Directory entirely
+  local canonical_home
+  canonical_home="$(realpath -m "${HOME}" 2>/dev/null || echo "${HOME}")"
+  if [ "${canonical_host}" = "${canonical_home}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is the entire user HOME directory and is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # 4. Sensitive directories under user HOME
+  local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local")
+  for s_sub in "${sens_dirs[@]}"; do
+    local s_path="${canonical_home}/${s_sub}"
+    if [ "${canonical_host}" = "${s_path}" ] || [[ "${canonical_host}" == "${s_path}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' contains sensitive directory '${s_sub}' and is blacklisted for security reasons!${CLR_RESET}" >&2
+      return 1
+    fi
+  done
+
+  if [ ! -e "${host_path}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Host mount path '${host_raw}' does not exist.${CLR_RESET}" >&2
+    return 1
+  fi
+  canonical_host="$(realpath "${host_path}")"
+
+  local mount_str
+  if [ "${mode}" = "ro" ]; then
+    mount_str="source=${canonical_host},target=${container_path},type=bind,readonly"
+  else
+    mount_str="source=${canonical_host},target=${container_path},type=bind"
+  fi
+
+  echo "${mount_str}"
+  return 0
+}
+
 do_init_sandbox() {
   local target_dir="${1:-.}"
   local template="${2:-default}"
   local auto_gitignore="${3:-prompt}" # prompt, yes, no
   local agy_version="${4:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
   local agy_patch="${5:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
+  local use_worktree="${6:-${CLI_WORKTREE:-false}}"
+  local worktree_branch="${7:-${CLI_WORKTREE_BRANCH:-agy-sandbox}}"
 
   # Expand tilde and relative paths to canonical absolute path
   target_dir="$(expand_path "${target_dir}")"
+
+  local extra_mounts=()
+
+  # 1. Process custom mounts from CLI_MOUNTS
+  if [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
+    for m_spec in "${CLI_MOUNTS[@]}"; do
+      local m_entry=""
+      if ! m_entry="$(validate_and_parse_mount "${m_spec}")"; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Mount validation failed for '${m_spec}'. Aborting.${CLR_RESET}" >&2
+        return 1
+      fi
+      extra_mounts+=("${m_entry}")
+    done
+  fi
+
+  # 2. Process Git worktree isolation if requested (FEAT-01)
+  local is_worktree=false
+  local worktree_dir=""
+  if [ "${use_worktree}" = "true" ]; then
+    if [ ! -d "${target_dir}" ]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Target directory '${target_dir}' does not exist.${CLR_RESET}" >&2
+      return 1
+    fi
+
+    if ! git -C "${target_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Target directory '${target_dir}' is not a git repository. Cannot create git worktree.${CLR_RESET}" >&2
+      return 1
+    fi
+
+    local main_repo_dir
+    main_repo_dir="$(git -C "${target_dir}" rev-parse --show-toplevel)"
+    local main_git_dir
+    main_git_dir="$(git -C "${target_dir}" rev-parse --git-common-dir)"
+    if [[ "${main_git_dir}" != /* ]]; then
+      main_git_dir="$(cd "${main_repo_dir}/${main_git_dir}" && pwd)"
+    else
+      main_git_dir="$(cd "${main_git_dir}" && pwd)"
+    fi
+
+    worktree_dir="${main_repo_dir}-sandbox"
+    if [ -d "${worktree_dir}" ]; then
+      if [ -f "${worktree_dir}/.git" ]; then
+        echo "==> [antigravity-sandbox] Existing git worktree found at '${worktree_dir}'. Reusing worktree..."
+      else
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Directory '${worktree_dir}' exists but is not a valid git worktree.${CLR_RESET}" >&2
+        return 1
+      fi
+    else
+      echo "==> [antigravity-sandbox] Creating git worktree in '${worktree_dir}' on branch '${worktree_branch}'..."
+      if ! git -C "${main_repo_dir}" worktree add -B "${worktree_branch}" "${worktree_dir}"; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to create git worktree in '${worktree_dir}'.${CLR_RESET}" >&2
+        return 1
+      fi
+    fi
+
+    mkdir -p "${main_git_dir}/hooks" "${main_git_dir}/info"
+    [ -f "${main_git_dir}/config" ] || touch "${main_git_dir}/config"
+
+    # Exclude .devcontainer/ in the main repository info/exclude
+    local exclude_file="${main_git_dir}/info/exclude"
+    if [ ! -f "${exclude_file}" ] || ! grep -q "^\.devcontainer" "${exclude_file}"; then
+      echo -e "\n# Antigravity Sandbox Dev Container\n.devcontainer/" >> "${exclude_file}"
+      echo "==> [antigravity-sandbox] Added .devcontainer/ to ${exclude_file}"
+    fi
+
+    # Add 4 VFS Read-Only Git metadata protection mounts
+    extra_mounts+=(
+      "source=${main_git_dir},target=${main_git_dir},type=bind"
+      "source=${main_git_dir}/hooks,target=${main_git_dir}/hooks,type=bind,readonly"
+      "source=${main_git_dir}/config,target=${main_git_dir}/config,type=bind,readonly"
+      "source=${main_git_dir}/info,target=${main_git_dir}/info,type=bind,readonly"
+    )
+
+    # Redirect target directory to worktree directory
+    target_dir="${worktree_dir}"
+    auto_gitignore="no"
+    is_worktree=true
+  fi
 
   if [ ! -d "${target_dir}" ]; then
     echo "==> [antigravity-sandbox] Directory '${target_dir}' does not exist. Creating..."
@@ -315,6 +578,11 @@ do_init_sandbox() {
 
   mkdir -p "${dest_devcontainer}"
 
+  local extra_mounts_json="[]"
+  if [ ${#extra_mounts[@]} -gt 0 ] && command -v jq >/dev/null 2>&1; then
+    extra_mounts_json="$(printf '%s\n' "${extra_mounts[@]}" | jq -R . | jq -s .)"
+  fi
+
   # Dispatch: Full Custom Mode vs Declarative Mode
   if [ -f "${template_path}/devcontainer.json" ] || [ -f "${template_path}/Dockerfile" ]; then
     echo "==> [antigravity-sandbox] Deploying Full Custom template..."
@@ -326,19 +594,56 @@ do_init_sandbox() {
       cp "${ROOT_DIR}/base/install-agy.sh" "${dest_devcontainer}/install-agy.sh"
       chmod +x "${dest_devcontainer}/install-agy.sh"
     fi
+    if [ -f "${dest_devcontainer}/devcontainer.json" ] && command -v jq >/dev/null 2>&1; then
+      local tmp_dc
+      tmp_dc="$(mktemp)"
+      local custom_filter='
+        .runArgs = [
+          "--network=" + $net,
+          "--dns=" + $dns1,
+          "--dns=" + $dns2,
+          "--pids-limit=" + $pids,
+          "--memory=" + $mem,
+          "--cpus=" + $cpus,
+          "--tmpfs=/tmp:rw,nosuid,nodev,size=" + $tmpfs + ",mode=1777"
+        ] + ((.runArgs // []) | map(select((
+            startswith("--network=") or
+            startswith("--dns=") or
+            startswith("--pids-limit=") or
+            startswith("--memory=") or
+            startswith("--cpus=") or
+            startswith("--tmpfs=/tmp:")
+          ) | not)))
+        | .mounts = ((.mounts // []) as $m | $m + ($extra_mounts | map(. as $x | select(($m | index($x)) == null))))
+      '
+      jq --arg net "${NETWORK_NAME}" \
+         --arg dns1 "${DNS_PRIMARY}" \
+         --arg dns2 "${DNS_SECONDARY}" \
+         --arg pids "${PIDS_LIMIT}" \
+         --arg mem "${MEMORY_LIMIT}" \
+         --arg cpus "${CPUS_LIMIT}" \
+         --arg tmpfs "${TMPFS_SIZE}" \
+         --argjson extra_mounts "${extra_mounts_json}" \
+         "${custom_filter}" \
+         "${dest_devcontainer}/devcontainer.json" > "${tmp_dc}"
+      mv "${tmp_dc}" "${dest_devcontainer}/devcontainer.json"
+    fi
   else
     echo "==> [antigravity-sandbox] Assembling declarative template from base..."
-    assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}" "${agy_version}" "${agy_patch}"
+    assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}" "${agy_version}" "${agy_patch}" "${extra_mounts_json}"
   fi
 
   if [ -f "${dest_devcontainer}/setup.sh" ]; then
     chmod +x "${dest_devcontainer}/setup.sh"
   fi
+  if [ -f "${dest_devcontainer}/install-agy.sh" ]; then
+    chmod +x "${dest_devcontainer}/install-agy.sh"
+  fi
 
   # Ensure isolated docker network and dynamic kernel routing exist on host (Fail-Closed)
   if command -v docker >/dev/null 2>&1; then
     echo "==> [antigravity-sandbox] Ensuring isolated network boundaries (Fail-Closed)..."
-    local ready_chk="${READY_FILE:-/run/agy-sandbox/network.ready}"
+    local ready_chk="${READY_FILE}"
     if ! "${SCRIPT_DIR}/ensure-network.sh" || [ ! -f "${ready_chk}" ]; then
       echo -e "\n${CLR_RED}==> [antigravity-sandbox] FATAL: Network isolation failed or ${ready_chk} is missing!${CLR_RESET}" >&2
       echo -e "${CLR_RED}==> [antigravity-sandbox] Aborting initialization in Fail-Closed mode to prevent unisolated execution.${CLR_RESET}" >&2
@@ -382,10 +687,17 @@ do_init_sandbox() {
   echo -e "${CLR_BOLD} Antigravity Sandbox successfully configured in ${dest_devcontainer}!${CLR_RESET}"
   echo -e "${CLR_GREEN}======================================================================${CLR_RESET}"
   echo "Template: '${template}'"
+  if [ "${is_worktree}" = "true" ]; then
+    echo "Mode: Isolated Git Worktree on branch '${worktree_branch}'"
+    echo "Host git hooks and config protected as Read-Only via VFS bind mounts."
+  fi
   echo "Next steps:"
   echo " 1. Open the project in VS Code / Cursor: code ${target_dir}"
   echo " 2. Press F1 -> 'Dev Containers: Reopen in Container'"
   echo " 3. Antigravity Agent will run safely inside the isolated container"
+  if [ "${is_worktree}" = "true" ]; then
+    echo " Note: All modifications are isolated in the git worktree and '${worktree_branch}' branch."
+  fi
   echo -e "${CLR_GREEN}======================================================================${CLR_RESET}"
 }
 
@@ -420,10 +732,10 @@ tui_service_menu() {
     
     # Quick Status Line
     local net_status="INACTIVE"
-    local net_name="${NETWORK_NAME:-agy_net}"
+    local net_name="${NETWORK_NAME}"
     local active_subnet="UNKNOWN"
-    local active_br="${BRIDGE_NAME:-agy0}"
-    local ready_marker="${READY_FILE:-/run/agy-sandbox/network.ready}"
+    local active_br="${BRIDGE_NAME}"
+    local ready_marker="${READY_FILE}"
 
     if [ -f "${ready_marker}" ]; then
       while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -502,7 +814,7 @@ tui_service_menu() {
           continue
         fi
         echo ""
-        local ready_chk="${READY_FILE:-/run/agy-sandbox/network.ready}"
+        local ready_chk="${READY_FILE}"
         if ! "${SCRIPT_DIR}/ensure-network.sh" || [ ! -f "${ready_chk}" ]; then
           echo -e "\n${CLR_RED}==> [antigravity-sandbox] Network isolation failed or ${ready_chk} missing!${CLR_RESET}"
         else
@@ -767,7 +1079,7 @@ tui_init_wizard() {
   fi
 
   echo ""
-  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}"
+  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}" "false" "agy-sandbox"
   pause_enter
 }
 
@@ -838,6 +1150,9 @@ run_tui() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   CLI_VERSION="${AGY_VERSION:-${DEFAULT_AGY_VERSION}}"
   CLI_PATCH="${AGY_PATCH:-${DEFAULT_AGY_PATCH}}"
+  CLI_WORKTREE=false
+  CLI_WORKTREE_BRANCH="agy-sandbox"
+  CLI_MOUNTS=()
   TARGET_DIR=""
   TEMPLATE=""
   FORCE_INTERACTIVE=false
@@ -867,6 +1182,36 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         FORCE_INTERACTIVE=true
         shift
         ;;
+      -w|--worktree)
+        CLI_WORKTREE=true
+        shift
+        ;;
+      --worktree-branch=*)
+        CLI_WORKTREE_BRANCH="${1#*=}"
+        CLI_WORKTREE=true
+        shift
+        ;;
+      --worktree-branch)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing branch name for --worktree-branch${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_WORKTREE_BRANCH="$2"
+        CLI_WORKTREE=true
+        shift 2
+        ;;
+      --mount=*)
+        CLI_MOUNTS+=("${1#*=}")
+        shift
+        ;;
+      --mount)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing specification for --mount${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_MOUNTS+=("$2")
+        shift 2
+        ;;
       -v|--agy-version|--version)
         if [ -z "${2:-}" ]; then
           echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing version argument for $1${CLR_RESET}" >&2
@@ -894,6 +1239,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo ""
         echo "Options:"
         echo "  -i, --interactive              Launch interactive terminal user interface"
+        echo "  -w, --worktree                 Create and run sandbox inside an isolated Git worktree"
+        echo "  --worktree-branch <name>       Git branch for worktree (default: 'agy-sandbox', implies --worktree)"
+        echo "  --mount <host:container[:ro|rw]> Bind mount host path into container (default mode: ro)"
         echo "  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. '1.4.6', 'latest')"
         echo "  --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)"
         echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary"
@@ -903,8 +1251,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  --install-bin                  Symlink agy-sandbox into ~/.local/bin"
         echo "  -h, --help                     Show this help message"
         echo ""
-        echo "Positional initialization:"
-        echo "  agy-sandbox /path/to/project [template_name] [-v version] [--no-patch]"
+        echo "Examples:"
+        echo "  agy-sandbox /path/to/project node"
+        echo "  agy-sandbox --worktree /path/to/project python"
+        echo "  agy-sandbox --worktree --worktree-branch experiment-1 /path/to/project"
+        echo "  agy-sandbox --mount /var/data/shared:/data:ro /path/to/project"
         exit 0
         ;;
       *)
@@ -928,17 +1279,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
   # If no arguments provided:
   if [ -z "$TARGET_DIR" ]; then
+    if [ "$CLI_WORKTREE" = true ] || [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
+      do_init_sandbox "." "default" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}"
+      exit 0
+    fi
     if [ -t 0 ] && [ -t 1 ]; then
       run_tui
       exit 0
     else
       # Non-interactive headless fallback when piped or called in CI without args
-      do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}"
+      do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}"
       exit 0
     fi
   fi
 
   # Positional arguments provided: agy-sandbox <target_dir> [template]
   TEMPLATE="${TEMPLATE:-default}"
-  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}"
+  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}"
 fi

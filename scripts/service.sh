@@ -23,11 +23,16 @@ SYSTEM_LIB_DIR="/usr/local/lib/agy-sandbox"
 SYSTEM_ENSURE_SCRIPT="${SYSTEM_LIB_DIR}/ensure-network.sh"
 SYSTEM_TEARDOWN_SCRIPT="${SYSTEM_LIB_DIR}/teardown-network.sh"
 
+# Save any explicit caller environment overrides before sourcing sandbox.conf
+_ENV_READY="${READY_FILE:-}"
+
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/sandbox.conf"
 fi
-READY_MARKER="${READY_FILE:-/run/agy-sandbox/network.ready}"
+
+[ -n "${_ENV_READY}" ] && READY_FILE="${_ENV_READY}"
+READY_MARKER="${READY_FILE}"
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then

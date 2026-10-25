@@ -16,15 +16,26 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Save any explicit caller environment overrides before sourcing sandbox.conf
+_ENV_NET="${NETWORK_NAME:-}"
+_ENV_BR="${BRIDGE_NAME:-}"
+_ENV_SUBNET="${SUBNET:-}"
+_ENV_DNS1="${DNS_PRIMARY:-}"
+_ENV_DNS2="${DNS_SECONDARY:-}"
+_ENV_READY="${READY_FILE:-}"
+
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/sandbox.conf"
 fi
 
-NETWORK_NAME="${NETWORK_NAME:-agy_net}"
-BRIDGE_NAME="${BRIDGE_NAME:-agy0}"
-SUBNET="${SUBNET:-}"
-READY_FILE="${READY_FILE:-/run/agy-sandbox/network.ready}"
+# Apply environment variable overrides if explicitly provided
+[ -n "${_ENV_NET}" ] && NETWORK_NAME="${_ENV_NET}"
+[ -n "${_ENV_BR}" ] && BRIDGE_NAME="${_ENV_BR}"
+[ -n "${_ENV_SUBNET}" ] && SUBNET="${_ENV_SUBNET}"
+[ -n "${_ENV_DNS1}" ] && DNS_PRIMARY="${_ENV_DNS1}"
+[ -n "${_ENV_DNS2}" ] && DNS_SECONDARY="${_ENV_DNS2}"
+[ -n "${_ENV_READY}" ] && READY_FILE="${_ENV_READY}"
 
 ensure_sudo() {
   if [ "$(id -u)" -eq 0 ]; then
