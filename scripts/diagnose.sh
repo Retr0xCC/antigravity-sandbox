@@ -137,6 +137,19 @@ audit_egress_isolation() {
 
   echo -e "  Checking egress blocks via TCP sockets and HTTP (CAP_NET_RAW safe)..."
 
+  # In-container kernel capability verification (if running inside container)
+  if [ -z "${exec_prefix}" ] && [ -f /proc/1/status ]; then
+    local cap_bnd
+    cap_bnd=$(grep -E "^CapBnd:" /proc/1/status 2>/dev/null | awk '{print $2}' || echo "")
+    if [ -n "${cap_bnd}" ]; then
+      if [ $(( (0x${cap_bnd} >> 13) & 1 )) -eq 0 ]; then
+        log_pass "Container: Kernel bounding set (CapBnd) confirms CAP_NET_RAW dropped."
+      else
+        log_warn "Container: Kernel bounding set (CapBnd) has CAP_NET_RAW enabled (0x${cap_bnd})."
+      fi
+    fi
+  fi
+
   # 1. Gateway host probe
   local gw_blocked=true
   for port in 22 80 2375 53; do
@@ -584,11 +597,10 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_fail "base/devcontainer.json: Missing or incomplete Fail-Closed initializeCommand (F2 risk!)."
   fi
 
-  # 4. runArgs security flags & limits (CNT-01, NET-05, F8, F15)
+  # 4. runArgs & capDrop security flags & limits (CNT-01, NET-05, F8, F15)
   run_args=$(jq -r '.runArgs[]?' "${DEV_JSON}")
   args_ok=true
   for req in "--security-opt=no-new-privileges:true" \
-             "--cap-drop=NET_RAW" \
              "--pids-limit=${PIDS_LIMIT}" \
              "--memory=${MEMORY_LIMIT}" \
              "--cpus=${CPUS_LIMIT}" \
@@ -600,8 +612,23 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       args_ok=false
     fi
   done
+
+  has_cap_drop=false
+  if echo "${run_args}" | grep -E -- "--cap-drop=(CAP_)?NET_RAW" >/dev/null 2>&1; then
+    has_cap_drop=true
+  elif jq -e '.capDrop // [] | any(ascii_upcase | test("^(CAP_)?(NET_RAW|ALL)$"))' "${DEV_JSON}" >/dev/null 2>&1; then
+    has_cap_drop=true
+  fi
+
+  if [ "${has_cap_drop}" = "true" ]; then
+    :
+  else
+    log_fail "base/devcontainer.json: Missing NET_RAW capability drop (neither in runArgs nor in capDrop)."
+    args_ok=false
+  fi
+
   if [ "${args_ok}" = "true" ]; then
-    log_pass "base/devcontainer.json: All runArgs security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
+    log_pass "base/devcontainer.json: All runArgs/capDrop security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
   fi
 
   # 5. mounts project isolation & readonly .devcontainer (CNT-02, F14, F17)
@@ -670,16 +697,26 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     # Stage 3 Live container inspection (docker inspect)
     c_inspect=$(docker inspect "${active_cid}" 2>/dev/null || echo "[]")
     if [ "${c_inspect}" != "[]" ]; then
-      if echo "${c_inspect}" | jq -e '.[0].HostConfig.SecurityOpt | index("no-new-privileges:true")' >/dev/null 2>&1; then
+      if echo "${c_inspect}" | jq -e '.[0].HostConfig.SecurityOpt // [] | any(test("^no-new-privileges(:true|=true)?$"))' >/dev/null 2>&1; then
         log_pass "Container: HostConfig.SecurityOpt contains 'no-new-privileges:true'."
       else
         log_warn "Container: HostConfig.SecurityOpt missing 'no-new-privileges:true'."
       fi
 
-      if echo "${c_inspect}" | jq -e '.[0].HostConfig.CapDrop | index("NET_RAW")' >/dev/null 2>&1; then
+      if echo "${c_inspect}" | jq -e '.[0].HostConfig.CapDrop // [] | any(ascii_upcase | test("^(CAP_)?(NET_RAW|ALL)$"))' >/dev/null 2>&1; then
         log_pass "Container: HostConfig.CapDrop drops NET_RAW."
       else
         log_warn "Container: HostConfig.CapDrop does not contain NET_RAW."
+      fi
+
+      # Direct kernel capability inspection (/proc/1/status CapBnd)
+      live_capbnd=$(docker exec "${active_cid}" grep -E '^CapBnd:' /proc/1/status 2>/dev/null | awk '{print $2}' || echo "")
+      if [ -n "${live_capbnd}" ]; then
+        if [ $(( (0x${live_capbnd} >> 13) & 1 )) -eq 0 ]; then
+          log_pass "Container: Kernel bounding set (CapBnd) confirms CAP_NET_RAW dropped."
+        else
+          log_warn "Container: Kernel bounding set (CapBnd) has CAP_NET_RAW enabled (0x${live_capbnd})."
+        fi
       fi
 
       pids_lim=$(echo "${c_inspect}" | jq -r '.[0].HostConfig.PidsLimit // 0' 2>/dev/null || echo "0")
