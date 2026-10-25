@@ -11,6 +11,10 @@ GITHUB_REPO="google-antigravity/antigravity-cli"
 TARGET_DIR="${TARGET_DIR:-${HOME}/.local/bin}"
 VERSION="${AGY_VERSION:-}"
 
+# Antigravity eligibility patcher (QNIX-Dev) supply chain pinning (SEC-03)
+PATCHER_REPO="${PATCHER_REPO:-https://github.com/QNIX-Dev/eligibility-antigravity-patcher.git}"
+PATCHER_COMMIT="${PATCHER_COMMIT:-90498f50353d414232f593dffe88899bc80b6312}"
+
 show_usage() {
   cat <<EOF
 Usage: install-agy.sh [OPTIONS] [VERSION] [TARGET_DIR]
