@@ -625,9 +625,10 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
   # 1. Credential & secret leak prevention (F1)
   if jq -e '.customizations.vscode.settings["dev.containers.copyGitConfig"] == false and
             .customizations.vscode.settings["dev.containers.dockerCredentialHelper"] == false and
+            .customizations.vscode.settings["dev.containers.mountWaylandSocket"] == false and
             .customizations.vscode.settings["git.terminalAuthentication"] == false and
             .customizations.vscode.settings["github.gitAuthentication"] == false' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: All 4 credential leak prevention flags active in vscode settings (F1)."
+    log_pass "base/devcontainer.json: All 5 isolation & leak prevention flags active in vscode settings (F1)."
   else
     log_fail "base/devcontainer.json: Missing one or more credential blocking flags in customizations.vscode.settings."
   fi

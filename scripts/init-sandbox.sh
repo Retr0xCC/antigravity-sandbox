@@ -229,6 +229,7 @@ assemble_devcontainer_json() {
       | .customizations.vscode.settings = (($base_settings * $tmpl_settings) * {
           "dev.containers.copyGitConfig": false,
           "dev.containers.dockerCredentialHelper": false,
+          "dev.containers.mountWaylandSocket": false,
           "git.terminalAuthentication": false,
           "github.gitAuthentication": false,
           "git.autofetch": false
