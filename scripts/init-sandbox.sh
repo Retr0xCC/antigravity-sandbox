@@ -224,7 +224,8 @@ assemble_devcontainer_json() {
     # Enforce security settings with highest precedence over template
     # shellcheck disable=SC2016
     local jq_filter='
-      .name = $name
+      del(.capDrop)
+      | .name = $name
       | .customizations.vscode.extensions = $exts
       | .customizations.vscode.settings = (($base_settings * $tmpl_settings) * {
           "dev.containers.copyGitConfig": false,
@@ -250,6 +251,13 @@ assemble_devcontainer_json() {
             startswith("--cpus=") or
             startswith("--tmpfs=/tmp:")
           ) | not)))
+      | .runArgs = (
+          if (.runArgs | any(test("^--cap-drop=(CAP_)?NET_RAW$"))) then
+            .runArgs
+          else
+            .runArgs + ["--cap-drop=NET_RAW"]
+          end
+        )
       | .mounts = (
           ((.mounts // []) as $m |
            (if ($m | any(startswith("source=agy-shared-config,target=/home/vscode/.gemini-shared"))) then
@@ -634,7 +642,8 @@ do_init_sandbox() {
       local tmp_dc
       tmp_dc="$(mktemp)"
       local custom_filter='
-        .runArgs = [
+        del(.capDrop)
+        | .runArgs = [
           "--network=" + $net,
           "--dns=" + $dns1,
           "--dns=" + $dns2,
@@ -650,6 +659,13 @@ do_init_sandbox() {
             startswith("--cpus=") or
             startswith("--tmpfs=/tmp:")
           ) | not)))
+        | .runArgs = (
+            if (.runArgs | any(test("^--cap-drop=(CAP_)?NET_RAW$"))) then
+              .runArgs
+            else
+              .runArgs + ["--cap-drop=NET_RAW"]
+            end
+          )
         | .mounts = (
           ((.mounts // []) as $m |
            (if ($m | any(startswith("source=agy-shared-config,target=/home/vscode/.gemini-shared"))) then

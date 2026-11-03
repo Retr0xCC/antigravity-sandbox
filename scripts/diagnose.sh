@@ -660,7 +660,7 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_fail "base/devcontainer.json: Missing or incomplete Fail-Closed initializeCommand (F2 risk!)."
   fi
 
-  # 4. runArgs & capDrop security flags & limits (CNT-01, NET-05, F8, F15)
+  # 4. runArgs security flags & limits (CNT-01, NET-05, F8, F15)
   run_args=$(jq -r '.runArgs[]?' "${DEV_JSON}")
   args_ok=true
   for req in "--security-opt=no-new-privileges:true" \
@@ -679,19 +679,22 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
   has_cap_drop=false
   if echo "${run_args}" | grep -E -- "--cap-drop=(CAP_)?NET_RAW" >/dev/null 2>&1; then
     has_cap_drop=true
-  elif jq -e '.capDrop // [] | any(ascii_upcase | test("^(CAP_)?(NET_RAW|ALL)$"))' "${DEV_JSON}" >/dev/null 2>&1; then
-    has_cap_drop=true
+  fi
+
+  if jq -e 'has("capDrop")' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_fail "base/devcontainer.json: Invalid top-level property 'capDrop' detected (Dev Containers specification supports capability drops only via runArgs '--cap-drop=NET_RAW')."
+    args_ok=false
   fi
 
   if [ "${has_cap_drop}" = "true" ]; then
     :
   else
-    log_fail "base/devcontainer.json: Missing NET_RAW capability drop (neither in runArgs nor in capDrop)."
+    log_fail "base/devcontainer.json: Missing NET_RAW capability drop in runArgs (--cap-drop=NET_RAW)."
     args_ok=false
   fi
 
   if [ "${args_ok}" = "true" ]; then
-    log_pass "base/devcontainer.json: All runArgs/capDrop security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
+    log_pass "base/devcontainer.json: All runArgs security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
   fi
 
   # 5. mounts shared config, project isolation & readonly .devcontainer (CNT-02, F14, F17)
