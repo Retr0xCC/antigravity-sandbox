@@ -967,6 +967,7 @@ tui_init_wizard() {
   echo ""
   
   local target_dir=""
+  CLI_MOUNTS=()
 
   while true; do
     # Configure Readline for directory completion if interactive
@@ -1043,6 +1044,51 @@ tui_init_wizard() {
         ;;
     esac
   done
+
+  # Git Worktree Isolation option (FEAT-01)
+  local use_worktree="false"
+  local worktree_branch="agy-sandbox"
+
+  if [ -d "${target_dir}" ] && git -C "${target_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo ""
+    echo -e "${CLR_BOLD}Git Worktree Isolation (FEAT-01):${CLR_RESET}"
+    echo -e "  Target directory is a Git repository. You can isolate the agent"
+    echo -e "  inside an isolated worktree branch with read-only .git metadata protection."
+    echo ""
+    echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}No${CLR_RESET}  - Configure sandbox directly inside '${target_dir}' (Default)"
+    echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}Yes${CLR_RESET} - Create isolated Git worktree (e.g. '${target_dir}-sandbox')"
+    echo ""
+
+    local rc=0
+    local wt_choice="1"
+    read -r -p "Enable Git worktree isolation? [1-2, default: 1]: " wt_choice || rc=$?
+    if [ "$rc" -gt 128 ]; then
+      echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
+      sleep 0.5
+      return 130
+    fi
+    wt_choice="${wt_choice:-1}"
+    case "${wt_choice}" in
+      2|[Yy]|[Yy][Ee][Ss])
+        use_worktree="true"
+        echo ""
+        local rc_wt=0
+        local wt_branch_input=""
+        read -r -p "Enter worktree branch name [default: agy-sandbox]: " wt_branch_input || rc_wt=$?
+        if [ "$rc_wt" -gt 128 ]; then
+          echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
+          sleep 0.5
+          return 130
+        fi
+        wt_branch_input="$(echo "${wt_branch_input}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        worktree_branch="${wt_branch_input:-agy-sandbox}"
+        echo -e "  ${CLR_GREEN}✓ Worktree enabled on branch '${worktree_branch}'${CLR_RESET}"
+        ;;
+      *)
+        use_worktree="false"
+        ;;
+    esac
+  fi
 
   echo ""
   echo -e "${CLR_BOLD}Available Templates:${CLR_RESET}"
@@ -1163,12 +1209,57 @@ tui_init_wizard() {
     esac
   done
 
+  # Additional Host Bind Mounts (FEAT-02)
+  echo ""
+  echo -e "${CLR_BOLD}Additional Host Bind Mounts (Optional):${CLR_RESET}"
+  echo -e "  Mount external host directories into the container (e.g. datasets, shared caches)."
+  echo -e "  Format: <host_path>:<container_path>[:ro|rw] (default mode: ro)"
+  echo ""
+  echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}No${CLR_RESET}  - Standard sandbox mounts only (Default)"
+  echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}Yes${CLR_RESET} - Configure custom bind mounts"
+  echo ""
+
+  local rc=0
+  local mount_choice="1"
+  read -r -p "Configure custom mounts? [1-2, default: 1]: " mount_choice || rc=$?
+  if [ "$rc" -gt 128 ]; then
+    echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
+    sleep 0.5
+    return 130
+  fi
+  mount_choice="${mount_choice:-1}"
+
+  case "${mount_choice}" in
+    2|[Yy]|[Yy][Ee][Ss])
+      while true; do
+        echo ""
+        local rc_m=0
+        local m_input=""
+        read -er -p "Enter mount (or press Enter when finished): " m_input || rc_m=$?
+        if [ "$rc_m" -gt 128 ]; then
+          break
+        fi
+        m_input="$(echo "${m_input}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        [ -z "${m_input}" ] && break
+
+        local parsed_entry=""
+        if parsed_entry="$(validate_and_parse_mount "${m_input}")"; then
+          CLI_MOUNTS+=("${m_input}")
+          echo -e "  ${CLR_GREEN}✓ Added custom mount: ${m_input}${CLR_RESET}"
+        else
+          echo -e "  ${CLR_YELLOW}Mount rejected. Please re-enter or press Enter to skip.${CLR_RESET}"
+        fi
+      done
+      ;;
+  esac
+
   local add_git="yes"
-  if [ -f "${target_dir}/.gitignore" ]; then
-    local rc=0
+  if [ "${use_worktree}" != "true" ] && [ -f "${target_dir}/.gitignore" ]; then
+    echo ""
+    local rc_git=0
     local git_choice="y"
-    read -r -p "Add .devcontainer/ to ${target_dir}/.gitignore? (Y/n): " git_choice || rc=$?
-    if [ "$rc" -gt 128 ]; then
+    read -r -p "Add .devcontainer/ to ${target_dir}/.gitignore? (Y/n): " git_choice || rc_git=$?
+    if [ "$rc_git" -gt 128 ]; then
       echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
       sleep 0.5
       return 130
@@ -1178,8 +1269,41 @@ tui_init_wizard() {
     fi
   fi
 
+  # Summary and Confirmation
   echo ""
-  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}" "false" "agy-sandbox"
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  echo -e "${CLR_BOLD}${CLR_CYAN}           SANDBOX INITIALIZATION SUMMARY                    ${CLR_RESET}"
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  echo -e "  Target Directory: ${CLR_BOLD}${target_dir}${CLR_RESET}"
+  if [ "${use_worktree}" = "true" ]; then
+    echo -e "  Git Worktree:     ${CLR_GREEN}Enabled (branch: ${worktree_branch}, path: ${target_dir}-sandbox)${CLR_RESET}"
+  else
+    echo -e "  Git Worktree:     ${CLR_DIM}Disabled (direct repository setup)${CLR_RESET}"
+  fi
+  echo -e "  Template Profile: ${CLR_CYAN}${selected_template}${CLR_RESET}"
+  echo -e "  Antigravity CLI:  ${CLR_CYAN}${selected_version}${CLR_RESET} (Patched: ${selected_patch})"
+  if [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
+    echo -e "  Custom Mounts:    ${CLR_GREEN}${#CLI_MOUNTS[@]} mount(s)${CLR_RESET}"
+    for cm in "${CLI_MOUNTS[@]}"; do
+      echo -e "                    ${CLR_DIM}- ${cm}${CLR_RESET}"
+    done
+  else
+    echo -e "  Custom Mounts:    ${CLR_DIM}None (standard isolation)${CLR_RESET}"
+  fi
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  echo ""
+
+  local rc_confirm=0
+  local confirm_init="y"
+  read -r -p "Proceed with sandbox initialization? [Y/n]: " confirm_init || rc_confirm=$?
+  if [ "$rc_confirm" -gt 128 ] || [[ "${confirm_init}" =~ ^[Nn]$ ]]; then
+    echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Initialization cancelled by user.${CLR_RESET}"
+    sleep 0.5
+    return 0
+  fi
+
+  echo ""
+  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}" "${use_worktree}" "${worktree_branch}"
   pause_enter
 }
 
