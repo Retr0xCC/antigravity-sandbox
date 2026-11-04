@@ -1,0 +1,1 @@
+AFFiNE MCP workspace profile: Node.js 22 LTS, affine-mcp-server, persistent session storage, and external AFFiNE Cloud/Self-Hosted integration.

@@ -1,0 +1,5 @@
+# System packages required for HTTPS/TLS verification, NodeSource GPG keys, and JSON parsing
+ca-certificates
+curl
+gnupg
+jq

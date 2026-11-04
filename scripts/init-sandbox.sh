@@ -358,6 +358,20 @@ assemble_declarative_template() {
   # 4. CLI installer
   cp "${ROOT_DIR}/base/install-agy.sh" "${dest_dir}/install-agy.sh"
   chmod +x "${dest_dir}/install-agy.sh"
+
+  # 5. Copy auxiliary template files (scripts, configs, readme)
+  for item in "${template_path}"/*; do
+    [ -e "${item}" ] || continue
+    local b_name
+    b_name="$(basename "${item}")"
+    case "${b_name}" in
+      description.txt|packages.txt|extra.Dockerfile|extra-setup.sh|settings.json|extensions.txt)
+        ;;
+      *)
+        cp -r "${item}" "${dest_dir}/"
+        ;;
+    esac
+  done
 }
 
 expand_path() {

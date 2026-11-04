@@ -1,0 +1,13 @@
+{
+  "[markdown]": {
+    "editor.wordWrap": "on",
+    "editor.quickSuggestions": {
+      "comments": "off",
+      "strings": "off",
+      "other": "off"
+    }
+  },
+  "files.associations": {
+    "*.md": "markdown"
+  }
+}
