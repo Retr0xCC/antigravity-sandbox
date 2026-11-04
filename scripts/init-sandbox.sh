@@ -1194,6 +1194,13 @@ tui_diagnostics() {
   pause_enter
 }
 
+tui_prune() {
+  trap 'echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Container cleanup cancelled.${CLR_RESET}"; sleep 0.5; return 130' INT
+  tui_header
+  "${SCRIPT_DIR}/prune-containers.sh" || true
+  pause_enter
+}
+
 run_tui() {
   while true; do
     trap 'cleanup_terminal; echo -e "\n${CLR_GREEN}Goodbye!${CLR_RESET}"; exit 0' INT
@@ -1209,11 +1216,14 @@ run_tui() {
     echo -e "  ${CLR_BOLD}[3] 🔍 Run Security Diagnostics${CLR_RESET}"
     echo -e "      ${CLR_DIM}Audit agy0 bridge, ip rule, Netfilter DOCKER-USER & host INPUT isolation${CLR_RESET}"
     echo ""
-    echo -e "  ${CLR_BOLD}[4] 🚪 Exit${CLR_RESET}"
+    echo -e "  ${CLR_BOLD}[4] 🧹 Prune Residual Containers & Artifacts${CLR_RESET}"
+    echo -e "      ${CLR_DIM}Clean exited, dead, or orphaned containers, keeping only active workspaces${CLR_RESET}"
+    echo ""
+    echo -e "  ${CLR_BOLD}[5] 🚪 Exit${CLR_RESET}"
     echo ""
     local rc=0
-    local main_choice="4"
-    read -r -p "Select option [1-4]: " main_choice || rc=$?
+    local main_choice="5"
+    read -r -p "Select option [1-5]: " main_choice || rc=$?
     if [ "$rc" -gt 128 ]; then
       cleanup_terminal
       echo -e "\n${CLR_GREEN}Goodbye!${CLR_RESET}"
@@ -1230,7 +1240,10 @@ run_tui() {
       3)
         tui_diagnostics || true
         ;;
-      4|q|Q)
+      4)
+        tui_prune || true
+        ;;
+      5|q|Q)
         cleanup_terminal
         echo -e "${CLR_GREEN}Goodbye!${CLR_RESET}"
         exit 0
@@ -1277,6 +1290,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --service|service)
         shift
         exec "${SCRIPT_DIR}/service.sh" "$@"
+        ;;
+      --clean|-c|--prune|clean|prune)
+        shift
+        exec "${SCRIPT_DIR}/prune-containers.sh" "$@"
         ;;
       --interactive|-i)
         FORCE_INTERACTIVE=true
@@ -1347,6 +1364,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary"
         echo "  -l, --list                     List available sandbox templates"
         echo "  -d, --diagnose, diagnose       Run security audit & boundary diagnostics"
+        echo "  -c, --clean, --prune           Clean up residual/orphaned containers and build artifacts"
         echo "  --service [COMMAND]            Manage systemd persistence (status|enable|disable|install)"
         echo "  --install-bin                  Symlink agy-sandbox into ~/.local/bin"
         echo "  -h, --help                     Show this help message"
