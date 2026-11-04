@@ -287,6 +287,33 @@ The diagnostic suite validates 8 comprehensive security checkpoints:
 
 ---
 
+### Pruning Residual Containers (`agy-sandbox --clean`)
+
+During Dev Container builds, rebuilds, or experiments, Docker may accumulate stopped (`Exited`), dead, or orphaned containers from deleted directories. However, regular stopped project containers (`Exited`) you plan to resume later are **never deleted without your explicit consent**.
+
+Antigravity Sandbox provides a selective, interactive pruner:
+
+```bash
+# Interactive selector with numbered stopped containers:
+agy-sandbox --clean
+
+# Clean ONLY defunct/orphaned containers (whose folders were deleted on host):
+agy-sandbox --clean --orphaned
+
+# Preview without deleting (Dry-Run):
+agy-sandbox --clean --dry-run
+
+# Complete purge of all stopped containers and intermediate image layers:
+agy-sandbox --clean --all -f
+```
+
+The feature is also available in the TUI menu via option `[4] 🧹 Prune Residual Containers & Artifacts`. The pruner clearly categorizes containers:
+* **Active (Running):** Active projects — strictly protected and preserved.
+* **Stopped (Exited):** Closed projects whose folders still exist on disk — displayed as a numbered checklist where you can selectively pick which ones to keep and which to remove.
+* **Defunct / Orphaned:** Failed builds (`created`/`dead`) and containers whose workspace folders were deleted on host — safely pruned.
+
+---
+
 ## Running in VS Code
 
 1. Open the project directory in VS Code:
@@ -401,8 +428,18 @@ antigravity-sandbox/
 │   ├── teardown-network.sh         # Removal of agy_net network and reset of filtering rules
 │   ├── service.sh                  # Management of systemd unit (agy-sandbox-network.service)
 │   ├── diagnose.sh                 # Host isolation and network rule audit script
+│   ├── prune-containers.sh         # Cleanup of residual, exited, and orphaned containers/images
 │   └── init-sandbox.sh             # CLI entry point (agy-sandbox) and TUI menu
 ├── templates/
+│   ├── affine-mcp/                 # Profile for AFFiNE Cloud and external instances integration via MCP
+│   │   ├── packages.txt            # System packages (ca-certificates, curl, gnupg, jq)
+│   │   ├── extensions.txt          # VS Code extensions (Markdown, REST client)
+│   │   ├── extra.Dockerfile        # Installation of Node.js 22 LTS and affine-mcp-server
+│   │   ├── extra-setup.sh          # Session persistence in agy-shared-config and mcp_config.json
+│   │   ├── affine-setup.sh         # Interactive connection and diagnostics wizard
+│   │   ├── settings.json           # VS Code configuration
+│   │   ├── README.md               # Connection guide and prompts
+│   │   └── description.txt
 │   ├── default/                    # Base profile (inherits base/ configuration)
 │   │   └── description.txt
 │   ├── math-labs/                  # Profile for mathematical computing and data analysis
