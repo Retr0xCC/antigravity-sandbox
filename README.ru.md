@@ -425,7 +425,7 @@ antigravity-sandbox/
 ├── scripts/
 │   ├── sandbox.conf                # Центральный конфиг (SSOT для сети, изоляции хоста и лимитов ресурсов контейнера)
 │   ├── ensure-network.sh           # Создание сети agy_net, правил Netfilter и ip rule
-│   ├── teardown-network.sh         # Удаление сети agy_net и сброс правил фильтрации
+│   ├── teardown-network.sh         # Сброс правил фильтрации и маршрутизации (удаление сети по флагу --delete-network)
 │   ├── service.sh                  # Управление systemd-юнитом (agy-sandbox-network.service)
 │   ├── diagnose.sh                 # Скрипт аудита сетевых правил и изоляции хоста
 │   ├── prune-containers.sh         # Очистка остаточных и осиротевших контейнеров и промежуточных образов

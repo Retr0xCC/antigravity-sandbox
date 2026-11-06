@@ -67,6 +67,17 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+# Wait for Docker daemon to become responsive if starting early on boot
+docker_retries=15
+while ! docker info >/dev/null 2>&1; do
+  if [ "${docker_retries}" -le 0 ]; then
+    echo "==> [antigravity-sandbox] Error: Docker daemon is not responding." >&2
+    exit 1
+  fi
+  sleep 1
+  docker_retries=$((docker_retries - 1))
+done
+
 ACTIVE_BRIDGE="${BRIDGE_NAME}"
 ACTIVE_SUBNET=""
 
@@ -106,34 +117,21 @@ else
   ACTIVE_SUBNET=$(docker network inspect "${NETWORK_NAME}" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "")
 fi
 
-# Verify bridge interface exists in kernel
+# Ensure kernel bridge interface exists without altering Docker network metadata
 if ! ip link show "${ACTIVE_BRIDGE}" >/dev/null 2>&1; then
-  connected_containers=$(docker network inspect "${NETWORK_NAME}" --format '{{len .Containers}}' 2>/dev/null || echo "0")
-  if [ "${connected_containers}" -eq 0 ]; then
-    echo "==> [antigravity-sandbox] Recreating network '${NETWORK_NAME}' to initialize bridge interface..."
-    docker network rm "${NETWORK_NAME}" 2>/dev/null || true
-    if [ -n "${SUBNET}" ]; then
-      docker network create \
-        --driver bridge \
-        --subnet "${SUBNET}" \
-        --opt "com.docker.network.bridge.enable_icc=true" \
-        --opt "com.docker.network.bridge.name=${BRIDGE_NAME}" \
-        "${NETWORK_NAME}"
-    else
-      docker network create \
-        --driver bridge \
-        --opt "com.docker.network.bridge.enable_icc=true" \
-        --opt "com.docker.network.bridge.name=${BRIDGE_NAME}" \
-        "${NETWORK_NAME}"
-    fi
-    ACTIVE_BRIDGE="${BRIDGE_NAME}"
-    ACTIVE_SUBNET=$(docker network inspect "${NETWORK_NAME}" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "")
+  echo "==> [antigravity-sandbox] Initializing kernel bridge '${ACTIVE_BRIDGE}' for existing network..."
+  ${SUDO} ip link add "${ACTIVE_BRIDGE}" type bridge 2>/dev/null || true
+  gw_ip=$(docker network inspect "${NETWORK_NAME}" -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "")
+  if [ -n "${gw_ip}" ] && [ -n "${ACTIVE_SUBNET}" ]; then
+    mask="${ACTIVE_SUBNET#*/}"
+    ${SUDO} ip addr add "${gw_ip}/${mask}" dev "${ACTIVE_BRIDGE}" 2>/dev/null || true
   fi
+  ${SUDO} ip link set "${ACTIVE_BRIDGE}" up 2>/dev/null || true
 fi
 
 if ! ip link show "${ACTIVE_BRIDGE}" >/dev/null 2>&1; then
-  echo "==> [antigravity-sandbox] Error: Bridge interface '${ACTIVE_BRIDGE}' does not exist in kernel." >&2
-  exit 1
+  echo "==> [antigravity-sandbox] Warning: Bridge interface '${ACTIVE_BRIDGE}' is not active in kernel yet."
+  echo "    Docker will instantiate it when a container starts. Boundary rules will still apply."
 fi
 
 BLOCKED_RANGES=(

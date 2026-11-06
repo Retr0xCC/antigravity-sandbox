@@ -70,7 +70,7 @@ generate_unit_content() {
 Description=Antigravity Sandbox Network Isolation Daemon
 Documentation=https://codeberg.org/Retr0xCC/antigravity-sandbox
 After=network.target docker.service
-Wants=docker.service
+Requires=docker.service
 
 [Service]
 Type=oneshot
@@ -202,6 +202,11 @@ cmd_uninstall() {
   ensure_sudo "Root privileges required to uninstall systemd service."
 
   echo "==> [antigravity-sandbox] Uninstalling '${SERVICE_NAME}'..."
+  if [ -x "${SYSTEM_TEARDOWN_SCRIPT}" ]; then
+    ${SUDO} "${SYSTEM_TEARDOWN_SCRIPT}" --delete-network 2>/dev/null || true
+  elif [ -x "${SCRIPT_DIR}/teardown-network.sh" ]; then
+    ${SUDO} "${SCRIPT_DIR}/teardown-network.sh" --delete-network 2>/dev/null || true
+  fi
   cmd_disable || true
 
   if [ -f "${UNIT_PATH}" ]; then

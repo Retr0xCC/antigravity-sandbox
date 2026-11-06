@@ -23,6 +23,7 @@ _ENV_SUBNET="${SUBNET:-}"
 _ENV_DNS1="${DNS_PRIMARY:-}"
 _ENV_DNS2="${DNS_SECONDARY:-}"
 _ENV_READY="${READY_FILE:-}"
+_ENV_DEL_NET="${DELETE_NETWORK:-}"
 
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
@@ -36,6 +37,27 @@ fi
 [ -n "${_ENV_DNS1}" ] && DNS_PRIMARY="${_ENV_DNS1}"
 [ -n "${_ENV_DNS2}" ] && DNS_SECONDARY="${_ENV_DNS2}"
 [ -n "${_ENV_READY}" ] && READY_FILE="${_ENV_READY}"
+
+DELETE_NETWORK=false
+[ -n "${_ENV_DEL_NET}" ] && DELETE_NETWORK="${_ENV_DEL_NET}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --delete-network|--prune-network)
+      DELETE_NETWORK=true
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [--delete-network]"
+      echo "  Tears down Netfilter rules, RPDB policy routing, and readiness marker."
+      echo "  --delete-network    Also remove the persistent Docker network entity (${NETWORK_NAME:-agy_net})."
+      exit 0
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
 
 BLOCKED_RANGES=(
   "0.0.0.0/8"
@@ -235,13 +257,17 @@ if command -v ip >/dev/null 2>&1; then
 fi
 
 # --------------------------------------------------------
-# 5. Remove Docker network
+# 5. Remove Docker network (Only if explicitly requested)
 # --------------------------------------------------------
-if command -v docker >/dev/null 2>&1; then
-  if docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
-    echo "==> Removing Docker network '${NETWORK_NAME}'..."
-    docker network rm "${NETWORK_NAME}" 2>/dev/null || true
+if [ "${DELETE_NETWORK}" = "true" ]; then
+  if command -v docker >/dev/null 2>&1; then
+    if docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
+      echo "==> Removing Docker network '${NETWORK_NAME}'..."
+      docker network rm "${NETWORK_NAME}" 2>/dev/null || true
+    fi
   fi
+else
+  echo "==> Preserving persistent Docker network '${NETWORK_NAME}' (pass --delete-network to remove)."
 fi
 
 echo "==> [antigravity-sandbox] Network teardown completed successfully."
