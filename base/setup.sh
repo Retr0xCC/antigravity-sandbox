@@ -22,8 +22,67 @@ fi
 # Ensure cache subdirectories exist
 mkdir -p "${USER_HOME}/.cache/uv" "${USER_HOME}/.cache/agy-downloads"
 
+# XDG Git configuration file for sandbox-managed safe.directory (persists without conflicting with host gitconfig)
+GIT_CONFIG_DIR="${USER_HOME}/.config/git"
+mkdir -p "${GIT_CONFIG_DIR}"
+GIT_XDG_CONFIG="${GIT_CONFIG_DIR}/config"
+
+# Install agy-sync-auth utility for onboarding/syncing tokens to shared volume (Fix NEW-04)
+cat << 'EOF_SYNC' > /tmp/agy-sync-auth
+#!/usr/bin/env bash
+set -e
+USER_HOME="${HOME:-/home/vscode}"
+SHARED_DIR="${USER_HOME}/.gemini-shared"
+LOCAL_DIR="${USER_HOME}/.gemini"
+
+if [ ! -d "${SHARED_DIR}" ]; then
+    echo "==> [antigravity-sandbox] Error: Shared directory ${SHARED_DIR} does not exist." >&2
+    echo "    Start the sandbox without '--shared-config isolated' to enable shared configuration." >&2
+    exit 1
+fi
+
+if [ ! -w "${SHARED_DIR}" ]; then
+    echo "==> [antigravity-sandbox] Error: ${SHARED_DIR} is mounted read-only." >&2
+    echo "    To onboard new authentication tokens into the global volume, run the sandbox with:" >&2
+    echo "      agy-sandbox <target_dir> --shared-config rw" >&2
+    exit 1
+fi
+
+echo "==> [antigravity-sandbox] Syncing authentication tokens to ${SHARED_DIR}..."
+FILES_SYNCED=0
+for rel in "antigravity-cli/installation_id" "antigravity-cli/settings.json" "antigravity-cli/jetski_state.pbtxt" "antigravity-cli/last_check.timestamp"; do
+    src="${LOCAL_DIR}/${rel}"
+    dst="${SHARED_DIR}/${rel}"
+    if [ -f "${src}" ]; then
+        mkdir -p "$(dirname "${dst}")"
+        cp -p "${src}" "${dst}"
+        echo "  ✓ Synced ${rel}"
+        FILES_SYNCED=$((FILES_SYNCED + 1))
+    fi
+done
+
+if [ ${FILES_SYNCED} -eq 0 ]; then
+    echo "==> [antigravity-sandbox] Warning: No authentication files found in ${LOCAL_DIR}/antigravity-cli/ to sync."
+    echo "    Log into Antigravity ('agy auth' or run agy) first, then re-run 'agy-sync-auth'."
+else
+    echo "==> [antigravity-sandbox] Successfully synced ${FILES_SYNCED} configuration file(s) to agy-shared-config volume."
+fi
+EOF_SYNC
+chmod 755 /tmp/agy-sync-auth
+if [ -w /usr/local/bin ]; then
+    cp -p /tmp/agy-sync-auth /usr/local/bin/agy-sync-auth 2>/dev/null || true
+fi
+mkdir -p "${USER_HOME}/.local/bin"
+cp -p /tmp/agy-sync-auth "${USER_HOME}/.local/bin/agy-sync-auth" 2>/dev/null || true
+rm -f /tmp/agy-sync-auth
+
 # Orchestrate configuration migration from .gemini-shared to .gemini (SEC-04 / Fix VULN-02)
 mkdir -p "${USER_HOME}/.gemini/antigravity-cli" "${USER_HOME}/.gemini/config"
+
+# Break legacy symlinks for mcp_config.json if present from previous versions (Fix VULN-02)
+if [ -L "${USER_HOME}/.gemini/config/mcp_config.json" ]; then
+    rm -f "${USER_HOME}/.gemini/config/mcp_config.json"
+fi
 
 # Notice: config/mcp_config.json is strictly project-isolated and NEVER shared across sandboxes (Fix VULN-02)!
 SHARED_CONFIG_FILES=(
@@ -59,8 +118,8 @@ if [ -d "${USER_HOME}/.gemini-shared" ]; then
             chmod u+rw "${gemini_path}" 2>/dev/null || true
         fi
 
-        # If .gemini-shared is mounted read-write and empty, populate it from local config (initial onboarding)
-        if [ -w "${USER_HOME}/.gemini-shared" ] && [ -f "${gemini_path}" ] && [ ! -e "${shared_path}" ]; then
+        # If .gemini-shared is mounted read-write, synchronize local tokens to shared volume (initial onboarding / update)
+        if [ -w "${USER_HOME}/.gemini-shared" ] && [ -f "${gemini_path}" ]; then
             mkdir -p "$(dirname "${shared_path}")"
             cp -p "${gemini_path}" "${shared_path}" 2>/dev/null || true
         fi
@@ -71,13 +130,13 @@ fi
 if [ -f "${MARKER_FILE}" ]; then
     # Ensure target workspace directory and worktree gitdir are added to git safe.directory
     if [ -n "${WORKSPACE_DIR}" ] && [ -d "${WORKSPACE_DIR}" ]; then
-        git config --global --add safe.directory "${WORKSPACE_DIR}" 2>/dev/null || true
+        git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${WORKSPACE_DIR}" 2>/dev/null || true
         if [ -f "${WORKSPACE_DIR}/.git" ]; then
             gitdir_ref="$(awk '/^gitdir:[[:space:]]*/ {print $2}' "${WORKSPACE_DIR}/.git" 2>/dev/null || echo "")"
             if [ -n "${gitdir_ref}" ]; then
-                git config --global --add safe.directory "${gitdir_ref}" 2>/dev/null || true
+                git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${gitdir_ref}" 2>/dev/null || true
                 git_common_dir="$(dirname "$(dirname "${gitdir_ref}")")"
-                [ -d "${git_common_dir}" ] && git config --global --add safe.directory "${git_common_dir}" 2>/dev/null || true
+                [ -d "${git_common_dir}" ] && git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${git_common_dir}" 2>/dev/null || true
             fi
         fi
     fi
@@ -154,26 +213,43 @@ fi
 
 # Safe git directory configuration scoped strictly to target workspace (Fix F11 & FEAT-01)
 if [ -n "${WORKSPACE_DIR}" ] && [ -d "${WORKSPACE_DIR}" ]; then
-    git config --global --add safe.directory "${WORKSPACE_DIR}" 2>/dev/null || true
+    git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${WORKSPACE_DIR}" 2>/dev/null || true
     if [ -f "${WORKSPACE_DIR}/.git" ]; then
         gitdir_ref="$(awk '/^gitdir:[[:space:]]*/ {print $2}' "${WORKSPACE_DIR}/.git" 2>/dev/null || echo "")"
         if [ -n "${gitdir_ref}" ]; then
-            git config --global --add safe.directory "${gitdir_ref}" 2>/dev/null || true
+            git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${gitdir_ref}" 2>/dev/null || true
             git_common_dir="$(dirname "$(dirname "${gitdir_ref}")")"
-            [ -d "${git_common_dir}" ] && git config --global --add safe.directory "${git_common_dir}" 2>/dev/null || true
+            [ -d "${git_common_dir}" ] && git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${git_common_dir}" 2>/dev/null || true
         fi
     fi
 fi
 
-# Clean up forwarded host authentication sockets and copied credentials (Fix F1 & VULN-04)
+# Clean up and disarm forwarded host authentication sockets and credentials (Fix F1, VULN-04 & NEW-05)
 rm -f /tmp/vscode-git-*.sock \
       /tmp/vscode-ssh-auth-*.sock \
-      /tmp/vscode-wayland-*.sock \
       /tmp/user/*/vscode-git-*.sock \
-      /tmp/user/*/vscode-ssh-auth-*.sock \
-      /tmp/user/*/vscode-wayland-*.sock \
-      /home/vscode/.gitconfig \
-      /home/vscode/.docker/config.json 2>/dev/null || true
+      /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true
+
+chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true
+rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true
+
+chmod 000 "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true
+rm -rf "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true
+
+chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true
+rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true
+
+rm -f "${USER_HOME}/.docker/config.json" 2>/dev/null || true
+
+# Sanitize copied .gitconfig (strip credentials/tokens while preserving user.name & user.email for git commit)
+if [ -f "${USER_HOME}/.gitconfig" ]; then
+    git config --file "${USER_HOME}/.gitconfig" --remove-section credential 2>/dev/null || true
+    git config --file "${USER_HOME}/.gitconfig" --remove-section http 2>/dev/null || true
+    git config --file "${USER_HOME}/.gitconfig" --remove-section core.sshCommand 2>/dev/null || true
+    git config --file "${USER_HOME}/.gitconfig" --remove-section gpg 2>/dev/null || true
+    git config --file "${USER_HOME}/.gitconfig" --unset-all core.sshCommand 2>/dev/null || true
+    git config --file "${USER_HOME}/.gitconfig" --unset-all core.askPass 2>/dev/null || true
+fi
 
 # Mark initialization as complete
 touch "${MARKER_FILE}"

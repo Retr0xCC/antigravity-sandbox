@@ -279,6 +279,8 @@ assemble_devcontainer_json() {
     shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume,readonly"
   elif [ "${shared_config}" = "rw" ] || [ "${shared_config}" = "true" ]; then
     shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"
+  elif [ "${shared_config}" = "isolated" ] || [ "${shared_config}" = "none" ] || [ "${shared_config}" = "false" ]; then
+    shared_config_mount=""
   fi
 
   local exts=()
@@ -309,11 +311,13 @@ assemble_devcontainer_json() {
   local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
 
   # Enforce security settings with highest precedence over template
-  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/user/*/vscode-wayland-*.sock /home/vscode/.gitconfig /home/vscode/.docker/config.json 2>/dev/null || true"
+  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then git config --file /home/vscode/.gitconfig --remove-section credential 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section http 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section gpg 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.askPass 2>/dev/null || true; fi"
 
   # shellcheck disable=SC2016
   local jq_filter='
-    del(.capDrop)
+    del(.privileged)
+    | del(.capAdd)
+    | del(.capDrop)
     | .name = $name
     | .customizations.vscode.extensions = $exts
     | .customizations.vscode.settings = (($base_settings * $tmpl_settings) * {
@@ -347,6 +351,8 @@ assemble_devcontainer_json() {
           startswith("--tmpfs=/tmp:") or
           startswith("--security-opt=no-new-privileges") or
           startswith("--sysctl=net.ipv6.conf") or
+          startswith("--privileged") or
+          startswith("--cap-add") or
           (. == "--init")
         ) | not)))
     | .runArgs = (
@@ -393,15 +399,23 @@ assemble_devcontainer_json() {
     | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
     | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
     | .postStartCommand = (
-        if .postStartCommand then
-          (if (.postStartCommand | contains("vscode-wayland-*.sock")) then .postStartCommand else (.postStartCommand + "; " + $clean_cmd) end)
+        if (.postStartCommand | type) == "string" then
+          (if (.postStartCommand | contains("vscode-wayland")) then .postStartCommand else (.postStartCommand + "; " + $clean_cmd) end)
+        elif (.postStartCommand | type) == "array" then
+          (if (.postStartCommand | any(tostring | contains("vscode-wayland"))) then .postStartCommand else (["bash", "-c", ($clean_cmd + "; \"$@\""), "--"] + .postStartCommand) end)
+        elif (.postStartCommand | type) == "object" then
+          (.postStartCommand + {"agy_cleanup": $clean_cmd})
         else
           $clean_cmd
         end
       )
     | .postAttachCommand = (
-        if .postAttachCommand then
-          (if (.postAttachCommand | contains("vscode-wayland-*.sock")) then .postAttachCommand else (.postAttachCommand + "; " + $clean_cmd) end)
+        if (.postAttachCommand | type) == "string" then
+          (if (.postAttachCommand | contains("vscode-wayland")) then .postAttachCommand else (.postAttachCommand + "; " + $clean_cmd) end)
+        elif (.postAttachCommand | type) == "array" then
+          (if (.postAttachCommand | any(tostring | contains("vscode-wayland"))) then .postAttachCommand else (["bash", "-c", ($clean_cmd + "; \"$@\""), "--"] + .postAttachCommand) end)
+        elif (.postAttachCommand | type) == "object" then
+          (.postAttachCommand + {"agy_cleanup": $clean_cmd})
         else
           $clean_cmd
         end
@@ -563,6 +577,18 @@ validate_target_dir() {
     return 1
   fi
 
+  # Check if target is /home, /Users, or an ancestor of user HOME (Fix NEW-03)
+  if [ "${canonical_target}" = "/home" ] || [ "${canonical_target}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_target}/"* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # Check if target is a hidden file or directory in user HOME (Fix NEW-03)
+  if [[ "${canonical_target}" == "${canonical_home}/."* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
   # 4. Sensitive credential and configuration directories under user HOME
   local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
   for s_sub in "${sens_dirs[@]}"; do
@@ -610,6 +636,12 @@ validate_and_parse_mount() {
     return 1
   fi
 
+  # Reject commas to prevent option injection attacks (Fix NEW-03)
+  if [[ "${host_raw}" == *","* ]] || [[ "${container_path}" == *","* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Mount paths cannot contain commas (','): '${spec}'${CLR_RESET}" >&2
+    return 1
+  fi
+
   if [ "${mode}" != "ro" ] && [ "${mode}" != "rw" ]; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid mount mode '${mode}' in '${spec}'. Expected 'ro' or 'rw'.${CLR_RESET}" >&2
     return 1
@@ -620,10 +652,21 @@ validate_and_parse_mount() {
     return 1
   fi
 
+  # Protect container system directory from overwrite (Fix NEW-03)
+  if [ "${container_path}" = "/usr/local/share/agy-sandbox" ] || [[ "${container_path}" == "/usr/local/share/agy-sandbox/"* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Container mount path cannot target protected system directory '/usr/local/share/agy-sandbox'.${CLR_RESET}" >&2
+    return 1
+  fi
+
   local host_path
   host_path="$(expand_path "${host_raw}")"
   local canonical_host
   canonical_host="$(realpath -m "${host_path}" 2>/dev/null || echo "${host_path}")"
+
+  if [[ "${canonical_host}" == *","* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Canonical host path contains commas (','): '${canonical_host}'${CLR_RESET}" >&2
+    return 1
+  fi
 
   # Security Blacklist checks
   # 1. Root filesystem
@@ -647,7 +690,7 @@ validate_and_parse_mount() {
     return 1
   fi
 
-  # 3. User Home Directory entirely
+  # 3. User Home Directory entirely and ancestor directories (Fix NEW-03)
   local canonical_home
   canonical_home="$(realpath -m "${HOME}" 2>/dev/null || echo "${HOME}")"
   if [ "${canonical_host}" = "${canonical_home}" ]; then
@@ -655,8 +698,19 @@ validate_and_parse_mount() {
     return 1
   fi
 
-  # 4. Sensitive directories under user HOME
-  local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local")
+  if [ "${canonical_host}" = "/home" ] || [ "${canonical_host}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_host}/"* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # 4. Hidden files or directories under user HOME (Fix NEW-03)
+  if [[ "${canonical_host}" == "${canonical_home}/."* ]]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # 5. Sensitive directories under user HOME
+  local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
   for s_sub in "${sens_dirs[@]}"; do
     local s_path="${canonical_home}/${s_sub}"
     if [ "${canonical_host}" = "${s_path}" ] || [[ "${canonical_host}" == "${s_path}/"* ]]; then
@@ -685,6 +739,11 @@ validate_and_parse_mount() {
 do_review_sandbox() {
   local target_dir_raw="${1:-.}"
   local branch="${2:-agy-sandbox}"
+
+  if ! git check-ref-format --branch "${branch}" 2>/dev/null; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Invalid git branch name '${branch}'.${CLR_RESET}" >&2
+    return 1
+  fi
 
   local target_dir=""
   if ! target_dir="$(validate_target_dir "${target_dir_raw}")"; then
@@ -716,7 +775,7 @@ do_review_sandbox() {
 
   # Fetch changes from sandbox into main repository FETCH_HEAD
   echo "==> Fetching commits from sandbox via safe Git transport protocol..."
-  if ! git -C "${main_repo_dir}" fetch "${sandbox_dir}" "${branch}"; then
+  if ! git -C "${main_repo_dir}" fetch --no-recurse-submodules -- "${sandbox_dir}" "refs/heads/${branch}"; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to fetch branch '${branch}' from '${sandbox_dir}'.${CLR_RESET}" >&2
     return 1
   fi
@@ -777,6 +836,11 @@ do_init_sandbox() {
   local is_worktree=false
   local worktree_dir=""
   if [ "${use_worktree}" = "true" ]; then
+    if ! git check-ref-format --branch "${worktree_branch}" 2>/dev/null; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Invalid git branch name '${worktree_branch}'.${CLR_RESET}" >&2
+      return 1
+    fi
+
     if [ ! -d "${target_dir}" ]; then
       echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Target directory '${target_dir}' does not exist.${CLR_RESET}" >&2
       return 1
@@ -796,6 +860,11 @@ do_init_sandbox() {
       if [ -f "${worktree_dir}/.git" ]; then
         echo -e "${CLR_YELLOW}==> [antigravity-sandbox] Warning: Detected legacy/vulnerable git worktree at '${worktree_dir}'.${CLR_RESET}"
         echo -e "    Legacy worktrees share the host's .git and are vulnerable to Host RCE ([VULN-01])."
+        if [ -n "$(git -C "${worktree_dir}" status --porcelain 2>/dev/null)" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Existing worktree '${worktree_dir}' contains uncommitted changes!${CLR_RESET}" >&2
+          echo -e "    Aborting to prevent data loss. Commit, stash, or manually remove '${worktree_dir}' before proceeding." >&2
+          return 1
+        fi
         echo -e "    Recreating '${worktree_dir}' as a fully isolated Git clone..."
         rm -rf "${worktree_dir}"
       elif [ -d "${worktree_dir}/.git" ]; then
@@ -813,7 +882,7 @@ do_init_sandbox() {
         echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to clone repository into '${worktree_dir}'.${CLR_RESET}" >&2
         return 1
       fi
-      if ! git -C "${worktree_dir}" checkout -B "${worktree_branch}"; then
+      if ! git -C "${worktree_dir}" checkout -B "${worktree_branch}" --; then
         echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to switch to branch '${worktree_branch}' in '${worktree_dir}'.${CLR_RESET}" >&2
         return 1
       fi
@@ -825,10 +894,10 @@ do_init_sandbox() {
     is_worktree=true
   fi
 
-  # 3. Add VFS Read-Only Git metadata protection mounts (Defense-in-Depth / VULN-01 Fix)
-  # Protects against agent modifying .git/config (core.fsmonitor / core.hooksPath) or injecting hooks
+  # 3. Add VFS Read-Only Git metadata protection mounts (Defense-in-Depth / VULN-01 & NEW-02 Fix)
+  # Protects against agent modifying .git/config (core.fsmonitor / core.hooksPath), injecting hooks, or submodules
   if [ -d "${target_dir}/.git" ]; then
-    mkdir -p "${target_dir}/.git/hooks" "${target_dir}/.git/info"
+    mkdir -p "${target_dir}/.git/hooks" "${target_dir}/.git/info" "${target_dir}/.git/modules"
     [ -f "${target_dir}/.git/config" ] || touch "${target_dir}/.git/config"
 
     # Exclude .devcontainer/ in info/exclude
@@ -841,6 +910,7 @@ do_init_sandbox() {
       "source=\${localWorkspaceFolder}/.git/hooks,target=\${containerWorkspaceFolder}/.git/hooks,type=bind,readonly"
       "source=\${localWorkspaceFolder}/.git/config,target=\${containerWorkspaceFolder}/.git/config,type=bind,readonly"
       "source=\${localWorkspaceFolder}/.git/info,target=\${containerWorkspaceFolder}/.git/info,type=bind,readonly"
+      "source=\${localWorkspaceFolder}/.git/modules,target=\${containerWorkspaceFolder}/.git/modules,type=bind,readonly"
     )
   elif [ -f "${target_dir}/.git" ]; then
     # In case of existing worktree file pointer, lock .git file as Read-Only
@@ -848,6 +918,12 @@ do_init_sandbox() {
       "source=\${localWorkspaceFolder}/.git,target=\${containerWorkspaceFolder}/.git,type=bind,readonly"
     )
   fi
+
+  # 4. Protect .vscode/ against Host RCE via tasks.json / settings.json (NEW-02 Fix)
+  mkdir -p "${target_dir}/.vscode"
+  extra_mounts+=(
+    "source=\${localWorkspaceFolder}/.vscode,target=\${containerWorkspaceFolder}/.vscode,type=bind,readonly"
+  )
 
   if [ ! -d "${target_dir}" ]; then
     echo "==> [antigravity-sandbox] Directory '${target_dir}' does not exist. Creating..."
@@ -911,17 +987,21 @@ do_init_sandbox() {
       shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume,readonly"
     elif [ "${shared_config}" = "rw" ] || [ "${shared_config}" = "true" ]; then
       shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"
+    elif [ "${shared_config}" = "isolated" ] || [ "${shared_config}" = "none" ] || [ "${shared_config}" = "false" ]; then
+      shared_config_mount=""
     fi
 
     local ready_path="${READY_FILE}"
     local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
-    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/user/*/vscode-wayland-*.sock /home/vscode/.gitconfig /home/vscode/.docker/config.json 2>/dev/null || true"
+    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then git config --file /home/vscode/.gitconfig --remove-section credential 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section http 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section gpg 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.askPass 2>/dev/null || true; fi"
 
     local tmp_dc
     tmp_dc="$(mktemp)"
     # shellcheck disable=SC2016
     local custom_filter='
-      del(.capDrop)
+      del(.privileged)
+      | del(.capAdd)
+      | del(.capDrop)
       | .customizations.vscode.settings = ((.customizations.vscode.settings // {}) * {
           "dev.containers.copyGitConfig": false,
           "dev.containers.dockerCredentialHelper": false,
@@ -953,6 +1033,8 @@ do_init_sandbox() {
           startswith("--tmpfs=/tmp:") or
           startswith("--security-opt=no-new-privileges") or
           startswith("--sysctl=net.ipv6.conf") or
+          startswith("--privileged") or
+          startswith("--cap-add") or
           (. == "--init")
         ) | not)))
       | .runArgs = (
@@ -982,8 +1064,12 @@ do_init_sandbox() {
         $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
       )
       | .initializeCommand = (
-          if .initializeCommand then
+          if (.initializeCommand | type) == "string" then
             (if (.initializeCommand | contains("Sandbox network isolation is NOT active")) then .initializeCommand else ($init_cmd + "; " + .initializeCommand) end)
+          elif (.initializeCommand | type) == "array" then
+            (if (.initializeCommand | any(tostring | contains("Sandbox network isolation is NOT active"))) then .initializeCommand else (["bash", "-c", ($init_cmd + "; \"$@\""), "--"] + .initializeCommand) end)
+          elif (.initializeCommand | type) == "object" then
+            (.initializeCommand + {"agy_fail_closed": $init_cmd})
           else
             $init_cmd
           end
@@ -1005,15 +1091,23 @@ do_init_sandbox() {
       | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
       | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
       | .postStartCommand = (
-          if .postStartCommand then
-            (if (.postStartCommand | contains("vscode-wayland-*.sock")) then .postStartCommand else (.postStartCommand + "; " + $clean_cmd) end)
+          if (.postStartCommand | type) == "string" then
+            (if (.postStartCommand | contains("vscode-wayland")) then .postStartCommand else (.postStartCommand + "; " + $clean_cmd) end)
+          elif (.postStartCommand | type) == "array" then
+            (if (.postStartCommand | any(tostring | contains("vscode-wayland"))) then .postStartCommand else (["bash", "-c", ($clean_cmd + "; \"$@\""), "--"] + .postStartCommand) end)
+          elif (.postStartCommand | type) == "object" then
+            (.postStartCommand + {"agy_cleanup": $clean_cmd})
           else
             $clean_cmd
           end
         )
       | .postAttachCommand = (
-          if .postAttachCommand then
-            (if (.postAttachCommand | contains("vscode-wayland-*.sock")) then .postAttachCommand else (.postAttachCommand + "; " + $clean_cmd) end)
+          if (.postAttachCommand | type) == "string" then
+            (if (.postAttachCommand | contains("vscode-wayland")) then .postAttachCommand else (.postAttachCommand + "; " + $clean_cmd) end)
+          elif (.postAttachCommand | type) == "array" then
+            (if (.postAttachCommand | any(tostring | contains("vscode-wayland"))) then .postAttachCommand else (["bash", "-c", ($clean_cmd + "; \"$@\""), "--"] + .postAttachCommand) end)
+          elif (.postAttachCommand | type) == "object" then
+            (.postAttachCommand + {"agy_cleanup": $clean_cmd})
           else
             $clean_cmd
           end
@@ -1770,13 +1864,22 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         shift
         ;;
       --worktree-branch=*|--branch=*)
-        CLI_WORKTREE_BRANCH="${1#*=}"
+        val="${1#*=}"
+        if ! git check-ref-format --branch "$val" 2>/dev/null; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Invalid branch name '$val' for $1${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_WORKTREE_BRANCH="$val"
         CLI_WORKTREE=true
         shift
         ;;
       --worktree-branch|--branch)
         if [ -z "${2:-}" ]; then
           echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing branch name for $1${CLR_RESET}" >&2
+          exit 1
+        fi
+        if ! git check-ref-format --branch "$2" 2>/dev/null; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Invalid branch name '$2' for $1${CLR_RESET}" >&2
           exit 1
         fi
         CLI_WORKTREE_BRANCH="$2"
@@ -1889,7 +1992,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)"
         echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary"
         echo "  --patcher-commit <sha>         Pin specific 40-character Git commit SHA for eligibility patcher"
-        echo "  --shared-config <mode>         Shared auth/config mount mode (readonly|rw|none, default: readonly)"
+        echo "  --shared-config <mode>         Shared auth/config mount mode (readonly|rw|isolated|none, default: readonly)"
         echo "  --shared-cache                 Share package and binary cache across sandboxes"
         echo "  --no-shared-cache              Isolate package cache per sandbox (default: isolated)"
         echo "  -l, --list                     List available sandbox templates"
@@ -1945,21 +2048,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
   # If no arguments provided:
   if [ -z "$TARGET_DIR" ]; then
-    if [ "$CLI_WORKTREE" = true ] || [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
-      if ! do_init_sandbox "." "default" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"; then
-        exit 1
-      fi
-      exit 0
-    fi
-    if [ -t 0 ] && [ -t 1 ]; then
+    if [ -t 0 ] && [ -t 1 ] && [ "$CLI_WORKTREE" != true ] && [ ${#CLI_MOUNTS[@]} -eq 0 ]; then
       run_tui
       exit 0
     else
-      # Non-interactive headless fallback when piped or called in CI without args
-      if ! do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"; then
-        exit 1
-      fi
-      exit 0
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Target directory is required in non-interactive mode or with flags.${CLR_RESET}" >&2
+      echo -e "    Usage: agy-sandbox <target_dir> [template] [options]" >&2
+      echo -e "    Example: agy-sandbox ~/projects/my-app" >&2
+      exit 1
     fi
   fi
 

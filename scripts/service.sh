@@ -71,6 +71,7 @@ Description=Antigravity Sandbox Network Isolation Daemon
 Documentation=https://codeberg.org/Retr0xCC/antigravity-sandbox
 After=network.target docker.service
 Requires=docker.service
+PartOf=docker.service
 
 [Service]
 Type=oneshot
@@ -84,7 +85,7 @@ ExecStart=${SYSTEM_ENSURE_SCRIPT}
 ExecStop=${SYSTEM_TEARDOWN_SCRIPT}
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target docker.service
 EOF
 }
 

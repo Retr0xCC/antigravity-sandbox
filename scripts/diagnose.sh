@@ -160,25 +160,25 @@ audit_egress_isolation() {
     fi
   fi
 
-  # In-container shared volume and symlink verification
+  # In-container shared volume and independent config verification (VULN-02 & NEW-04)
   if [ -z "${exec_prefix}" ] && [ -d /home/vscode/.gemini-shared ]; then
     local sh_owner
     sh_owner=$(stat -c "%U:%G" /home/vscode/.gemini-shared 2>/dev/null || echo "unknown")
     if [ "${sh_owner}" = "vscode:vscode" ]; then
       log_pass "Container: /home/vscode/.gemini-shared exists and is owned by vscode:vscode."
     fi
-    local symlinks_ok=true
+    if grep -q " /home/vscode/\.gemini-shared .*ro[ ,]" /proc/mounts 2>/dev/null; then
+      log_pass "Container: /home/vscode/.gemini-shared is mounted Read-Only (VULN-02)."
+    fi
+    local symlinks_found=false
     for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
-      local link_target
-      link_target=$(readlink "/home/vscode/.gemini/${s_file}" 2>/dev/null || echo "")
-      if [ "${link_target}" = "/home/vscode/.gemini-shared/${s_file}" ]; then
-        :
-      else
-        symlinks_ok=false
+      if [ -L "/home/vscode/.gemini/${s_file}" ]; then
+        symlinks_found=true
+        log_fail "Container: /home/vscode/.gemini/${s_file} is a symlink (VULN-02 violation)!"
       fi
     done
-    if [ "${symlinks_ok}" = "true" ]; then
-      log_pass "Container: Shared configuration symlinks properly link .gemini to .gemini-shared."
+    if [ "${symlinks_found}" = "false" ]; then
+      log_pass "Container: .gemini files are independent instances (Copy-on-Initialize, VULN-02)."
     fi
   fi
 
@@ -205,12 +205,40 @@ audit_egress_isolation() {
       fi
     fi
 
-    # Wayland, Docker config, and Git credentials leakage probes (VULN-04)
+    # Wayland, GPG agent, Docker config, and Git credentials leakage probes (VULN-04 & NEW-05)
     wayland_leak=$(${exec_prefix} sh -c 'ls -d /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null' || echo "")
     if [ -n "${wayland_leak}" ]; then
-      log_warn "Container: Forwarded Wayland socket detected (${wayland_leak}). Set dev.containers.mountWaylandSocket: false in host User settings (VULN-04)."
+      local first_w="${wayland_leak%%$'\n'*}"
+      local w_perm
+      w_perm=$(${exec_prefix} stat -c "%a" "${first_w}" 2>/dev/null || echo "")
+      if [ "${w_perm}" = "0" ] || [ "${w_perm}" = "000" ]; then
+        log_pass "Container: Forwarded Wayland socket is disarmed (mode 000, VULN-04/NEW-05)."
+      else
+        log_warn "Container: Forwarded Wayland socket detected (${first_w}) with permissions ${w_perm}. Set dev.containers.mountWaylandSocket: false in host User settings (VULN-04)."
+      fi
     else
       log_pass "Container: No leaked Wayland sockets detected (VULN-04)."
+    fi
+
+    gpg_leak=$(${exec_prefix} sh -c 'ls -d /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null' || echo "")
+    if [ -n "${gpg_leak}" ]; then
+      log_fail "Container: Leaked GPG agent socket detected (${gpg_leak})! Set dev.containers.forwardGpg: false in host settings (NEW-05)."
+    else
+      log_pass "Container: No GPG agent sockets leaked."
+    fi
+
+    ipc_leak=$(${exec_prefix} sh -c 'ls -d /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null' || echo "")
+    if [ -n "${ipc_leak}" ]; then
+      local first_ipc="${ipc_leak%%$'\n'*}"
+      local ipc_perm
+      ipc_perm=$(${exec_prefix} stat -c "%a" "${first_ipc}" 2>/dev/null || echo "")
+      if [ "${ipc_perm}" = "0" ] || [ "${ipc_perm}" = "000" ]; then
+        log_pass "Container: VS Code IPC sockets disarmed (mode 000, NEW-05)."
+      else
+        log_warn "Container: Leaked VS Code IPC socket detected (${first_ipc})."
+      fi
+    else
+      log_pass "Container: No leaked VS Code IPC sockets."
     fi
 
     if ${exec_prefix} test -f /home/vscode/.docker/config.json 2>/dev/null; then
@@ -219,8 +247,13 @@ audit_egress_isolation() {
       log_pass "Container: /home/vscode/.docker/config.json is absent (no Docker credentials leaked)."
     fi
 
+    # Check gitconfig sanitization (NEW-05): ensure credentials/tokens stripped
     if ${exec_prefix} test -f /home/vscode/.gitconfig 2>/dev/null; then
-      log_fail "Container: Leaked host .gitconfig found (/home/vscode/.gitconfig)!"
+      if ${exec_prefix} git config --file /home/vscode/.gitconfig --get-regexp "credential|http\.|extraheader" >/dev/null 2>&1; then
+        log_fail "Container: /home/vscode/.gitconfig contains leaked credentials or HTTP authorization headers (NEW-05)!"
+      else
+        log_pass "Container: /home/vscode/.gitconfig is sanitized (no credentials or tokens leaked, NEW-05)."
+      fi
     else
       log_pass "Container: /home/vscode/.gitconfig is absent."
     fi
@@ -655,7 +688,7 @@ if [ -f "${ROOT_DIR}/base/setup.sh" ]; then
   fi
 
   # 3. Clean forwarded sockets
-  if grep -q "rm -f /tmp/vscode-git-\*\.sock /tmp/vscode-ssh-auth-\*\.sock" "${ROOT_DIR}/base/setup.sh"; then
+  if grep -q "vscode-git-\*\.sock" "${ROOT_DIR}/base/setup.sh" && grep -q "vscode-ssh-auth-\*\.sock" "${ROOT_DIR}/base/setup.sh"; then
     log_pass "base/setup.sh: Forwarded host authentication socket cleanup routine present."
   else
     log_warn "base/setup.sh: Forwarded socket cleanup routine missing."
@@ -870,7 +903,7 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       log_fail "scripts/init-sandbox.sh: Missing postAttachCommand or remote.autoForwardPorts enforcement (VULN-04 risk!)."
     fi
 
-    # VULN-05 verification: target directory security blacklist validation
+    # VULN-05 & NEW-03 verification: target directory security blacklist validation
     if grep -q "validate_target_dir" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q "Cannot initialize sandbox directly in user root HOME directory" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
       log_pass "scripts/init-sandbox.sh: Target directory blacklist validation enforced (validate_target_dir, VULN-05)."
@@ -878,10 +911,40 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       log_fail "scripts/init-sandbox.sh: Missing target directory blacklist validation (VULN-05 risk!)."
     fi
 
+    if grep -q "is an ancestor of user HOME" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -q "is a hidden file or directory in user HOME" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Target directory blacklist blocks /home ancestors and user dotfiles (NEW-03)."
+    else
+      log_fail "scripts/init-sandbox.sh: Target directory blacklist missing ancestor or dotfile checks (NEW-03 risk!)."
+    fi
+
     if grep -A 20 "do_init_sandbox()" "${ROOT_DIR}/scripts/init-sandbox.sh" | grep -q "validate_target_dir"; then
       log_pass "scripts/init-sandbox.sh: do_init_sandbox verifies target_dir against host blacklist (VULN-05)."
     else
       log_fail "scripts/init-sandbox.sh: do_init_sandbox does not validate target_dir (VULN-05 risk!)."
+    fi
+
+    # NEW-02 verification: read-only .vscode and .git/modules in sandbox
+    if grep -F -q 'target=\${containerWorkspaceFolder}/.vscode,type=bind,readonly' "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -F -q 'target=\${containerWorkspaceFolder}/.git/modules,type=bind,readonly' "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: .vscode and .git/modules mounted as Read-Only to prevent Host RCE (NEW-02)."
+    else
+      log_fail "scripts/init-sandbox.sh: Missing read-only protection for .vscode or .git/modules (NEW-02 risk!)."
+    fi
+
+    # NEW-02 verification: branch format checking
+    if grep -q "git check-ref-format --branch" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Git branch names validated with git check-ref-format (NEW-02)."
+    else
+      log_fail "scripts/init-sandbox.sh: Missing branch name format validation (NEW-02 risk!)."
+    fi
+
+    # OPEN-03 verification: Full Custom Mode privileged/capAdd stripping
+    if grep -q "del(.privileged)" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -q "del(.capAdd)" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Full Custom Mode strips privileged and capAdd from custom configurations (OPEN-03)."
+    else
+      log_fail "scripts/init-sandbox.sh: Full Custom Mode does not strip privileged/capAdd (OPEN-03 risk!)."
     fi
 
     # Review command support
@@ -914,7 +977,7 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     if [ -f "${h_set}" ]; then
       found_host_settings=true
       h_ok=true
-      for req_flag in "dev.containers.copyGitConfig" "dev.containers.dockerCredentialHelper" "dev.containers.mountWaylandSocket"; do
+      for req_flag in "dev.containers.copyGitConfig" "dev.containers.dockerCredentialHelper" "dev.containers.mountWaylandSocket" "dev.containers.forwardGpg"; do
         val=$(jq -r ".[\"${req_flag}\"] // empty" "${h_set}" 2>/dev/null || echo "")
         if [ "${val}" != "false" ]; then
           h_ok=false
@@ -927,7 +990,7 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     fi
   done
   if [ "${found_host_settings}" = "false" ]; then
-    log_info "Host IDE User settings not found at standard paths. If using VS Code/Cursor on host, set dev.containers.copyGitConfig: false, dev.containers.dockerCredentialHelper: false, and dev.containers.mountWaylandSocket: false in host settings."
+    log_info "Host IDE User settings not found at standard paths. If using VS Code/Cursor on host, set dev.containers.copyGitConfig: false, dev.containers.dockerCredentialHelper: false, dev.containers.mountWaylandSocket: false, and dev.containers.forwardGpg: false in host settings."
   fi
 else
   log_info "base/devcontainer.json not found or jq unavailable. Skipping static devcontainer audit."
@@ -979,19 +1042,16 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         log_fail "Container: /home/vscode/.gemini-shared owned by '${sh_owner}' (expected vscode:vscode)."
       fi
 
-      # Verify shared configuration symlinks
-      symlinks_ok=true
-      for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id"; do
-        target_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/${s_file}" 2>/dev/null || echo "")
-        if [ "${target_link}" = "/home/vscode/.gemini-shared/${s_file}" ]; then
-          :
-        else
-          symlinks_ok=false
-          log_warn "Container: Symlink for ${s_file} missing or points to '${target_link}' (expected /home/vscode/.gemini-shared/${s_file})."
+      # Verify shared configuration independent instances (Copy-on-Initialize, VULN-02 & NEW-04)
+      local symlinks_found=false
+      for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
+        if docker exec "${active_cid}" test -L "/home/vscode/.gemini/${s_file}" 2>/dev/null; then
+          symlinks_found=true
+          log_fail "Container: /home/vscode/.gemini/${s_file} is a symlink (VULN-02 violation)!"
         fi
       done
-      if [ "${symlinks_ok}" = "true" ]; then
-        log_pass "Container: Shared configuration symlinks properly link .gemini to .gemini-shared."
+      if [ "${symlinks_found}" = "false" ]; then
+        log_pass "Container: .gemini configuration files are independent instances (Copy-on-Initialize, VULN-02)."
       fi
 
       # Verify mcp_config.json is NOT symlinked to .gemini-shared (VULN-02)
