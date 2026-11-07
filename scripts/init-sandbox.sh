@@ -18,6 +18,14 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Fail-Closed check: jq is strictly required for secure JSON manipulation and policy enforcement (VULN-03)
+if ! command -v jq >/dev/null 2>&1; then
+  echo -e "\n\033[1;31m==> [antigravity-sandbox] FATAL: 'jq' command is required for secure sandbox generation.\033[0m" >&2
+  echo -e "\033[1;31m==> [antigravity-sandbox] Fail-Closed: Aborting to prevent generation of unconstrained sandbox environments.\033[0m" >&2
+  echo "    Please install jq via your package manager (e.g. 'sudo apt-get install -y jq' or 'brew install jq')." >&2
+  exit 1
+fi
+
 # Save any explicit caller environment overrides before sourcing sandbox.conf
 _ENV_NET="${NETWORK_NAME:-}"
 _ENV_BR="${BRIDGE_NAME:-}"
@@ -283,144 +291,131 @@ assemble_devcontainer_json() {
     done < "${template_dir}/extensions.txt"
   fi
 
-  if command -v jq >/dev/null 2>&1; then
-    local exts_json="[]"
-    if [ ${#exts[@]} -gt 0 ]; then
-      exts_json=$(printf '%s\n' "${exts[@]}" | jq -R . | jq -s .)
-    fi
-
-    local base_settings="{}"
-    base_settings=$(jq ".customizations.vscode.settings // {}" "${base_json}")
-
-    local tmpl_settings="{}"
-    if [ -f "${template_dir}/settings.json" ]; then
-      tmpl_settings=$(jq . "${template_dir}/settings.json")
-    fi
-
-    # Initialize fail-closed host check command synchronized with sandbox.conf
-    local ready_path="${READY_FILE}"
-    local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
-
-    # Enforce security settings with highest precedence over template
-    # shellcheck disable=SC2016
-    local jq_filter='
-      del(.capDrop)
-      | .name = $name
-      | .customizations.vscode.extensions = $exts
-      | .customizations.vscode.settings = (($base_settings * $tmpl_settings) * {
-          "dev.containers.copyGitConfig": false,
-          "dev.containers.dockerCredentialHelper": false,
-          "dev.containers.mountWaylandSocket": false,
-          "git.terminalAuthentication": false,
-          "github.gitAuthentication": false,
-          "git.autofetch": false
-        })
-      | .runArgs = [
-          "--network=" + $net,
-          "--dns=" + $dns1,
-          "--dns=" + $dns2,
-          "--pids-limit=" + $pids,
-          "--memory=" + $mem,
-          "--cpus=" + $cpus,
-          "--tmpfs=/tmp:rw,nosuid,nodev,size=" + $tmpfs + ",mode=1777"
-        ] + (.runArgs | map(select((
-            startswith("--network=") or
-            startswith("--dns=") or
-            startswith("--pids-limit=") or
-            startswith("--memory=") or
-            startswith("--cpus=") or
-            startswith("--tmpfs=/tmp:")
-          ) | not)))
-      | .runArgs = (
-          if (.runArgs | any(test("^--cap-drop=(CAP_)?NET_RAW$"))) then
-            .runArgs
-          else
-            .runArgs + ["--cap-drop=NET_RAW"]
-          end
-        )
-      | .mounts = (
-          ((.mounts // []) | map(select(
-            (startswith("source=agy-shared-config") or
-             startswith("source=agy-shared-cache") or
-             startswith("source=agy-cache-") or
-             startswith("source=agy-gemini-data-")) | not
-          ))) as $filtered |
-          (if ($shared_cfg != "") then [$shared_cfg] else [] end) +
-          $filtered +
-          [
-            ("source=" + $cache_vol + ",target=/home/vscode/.cache,type=volume"),
-            ("source=" + $proj_vol + ",target=/home/vscode/.gemini,type=volume")
-          ] as $base_m |
-          $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
-        )
-      | .initializeCommand = $init_cmd
-      | .build.args.AGY_VERSION = $ver
-      | .build.args.PATCHER_COMMIT = $patcher_commit
-      | .remoteEnv.AGY_VERSION = $ver
-      | .remoteEnv.AGY_PATCH = $patch
-      | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
-      | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
-      | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
-      | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
-    '
-
-    jq --arg name "\${localWorkspaceFolderBasename} (${display_name} Sandbox)" \
-       --arg ver "${agy_version}" \
-       --arg patch "${agy_patch}" \
-       --arg patcher_commit "${patcher_commit}" \
-       --arg net "${NETWORK_NAME}" \
-       --arg dns1 "${DNS_PRIMARY}" \
-       --arg dns2 "${DNS_SECONDARY}" \
-       --arg pids "${PIDS_LIMIT}" \
-       --arg mem "${MEMORY_LIMIT}" \
-       --arg cpus "${CPUS_LIMIT}" \
-       --arg tmpfs "${TMPFS_SIZE}" \
-       --arg init_cmd "${init_cmd}" \
-       --arg shared_cfg "${shared_config_mount}" \
-       --arg cache_vol "${cache_volume}" \
-       --arg proj_vol "${project_volume}" \
-       --argjson exts "${exts_json}" \
-       --argjson base_settings "${base_settings}" \
-       --argjson tmpl_settings "${tmpl_settings}" \
-       --argjson extra_mounts "${extra_mounts_json}" \
-       "${jq_filter}" \
-       "${base_json}" > "${output_file}"
-  else
-    local template_content
-    template_content=$(cat "${base_json}")
-    template_content="${template_content//@@TEMPLATE_NAME@@/${display_name}}"
-    template_content="${template_content//\"AGY_VERSION\": \"1.5.3\"/\"AGY_VERSION\": \"${agy_version}\"}"
-    template_content="${template_content//\"AGY_PATCH\": \"true\"/\"AGY_PATCH\": \"${agy_patch}\"}"
-    template_content="${template_content//\"PATCHER_COMMIT\": \"90498f50353d414232f593dffe88899bc80b6312\"/\"PATCHER_COMMIT\": \"${patcher_commit}\"}"
-    template_content="${template_content//\"--network=agy_net\"/\"--network=${NETWORK_NAME}\"}"
-    template_content="${template_content//\"--dns=9.9.9.9\"/\"--dns=${DNS_PRIMARY}\"}"
-    template_content="${template_content//\"--dns=149.112.112.112\"/\"--dns=${DNS_SECONDARY}\"}"
-    template_content="${template_content//\"--pids-limit=2048\"/\"--pids-limit=${PIDS_LIMIT}\"}"
-    template_content="${template_content//\"--memory=8g\"/\"--memory=${MEMORY_LIMIT}\"}"
-    template_content="${template_content//\"--cpus=4\"/\"--cpus=${CPUS_LIMIT}\"}"
-    template_content="${template_content//\"size=2g\"/\"size=${TMPFS_SIZE}\"}"
-    if [ -n "${shared_config_mount}" ]; then
-      if echo "${template_content}" | grep -q "source=agy-shared-config"; then
-        template_content=$(echo "${template_content}" | sed 's|source=agy-shared-config[^",]*|'"${shared_config_mount}"'|')
-      else
-        template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "'"${shared_config_mount}"'",|')
-      fi
-    fi
-    if echo "${template_content}" | grep -q "target=/home/vscode/.cache"; then
-      template_content=$(echo "${template_content}" | sed -E 's|source=[^",]+,target=/home/vscode/\.cache|source='"${cache_volume}"',target=/home/vscode/.cache|')
-    else
-      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source='"${cache_volume}"',target=/home/vscode/.cache,type=volume",|')
-    fi
-    if echo "${template_content}" | grep -q "source=agy-gemini-data-"; then
-      template_content=$(echo "${template_content}" | sed -E 's|source=agy-gemini-data-[^",]+|source='"${project_volume}"'|')
-    else
-      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source='"${project_volume}"',target=/home/vscode/.gemini,type=volume",|')
-    fi
-    if ! echo "${template_content}" | grep -q "UV_CACHE_DIR"; then
-      template_content=$(echo "${template_content}" | sed 's|"remoteEnv": {|"remoteEnv": {\n    "UV_CACHE_DIR": "/home/vscode/.cache/uv",\n    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",|')
-    fi
-    echo -e "${template_content}" > "${output_file}"
+  local exts_json="[]"
+  if [ ${#exts[@]} -gt 0 ]; then
+    exts_json=$(printf '%s\n' "${exts[@]}" | jq -R . | jq -s .)
   fi
+
+  local base_settings="{}"
+  base_settings=$(jq ".customizations.vscode.settings // {}" "${base_json}")
+
+  local tmpl_settings="{}"
+  if [ -f "${template_dir}/settings.json" ]; then
+    tmpl_settings=$(jq . "${template_dir}/settings.json")
+  fi
+
+  # Initialize fail-closed host check command synchronized with sandbox.conf
+  local ready_path="${READY_FILE}"
+  local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
+
+  # Enforce security settings with highest precedence over template
+  # shellcheck disable=SC2016
+  local jq_filter='
+    del(.capDrop)
+    | .name = $name
+    | .customizations.vscode.extensions = $exts
+    | .customizations.vscode.settings = (($base_settings * $tmpl_settings) * {
+        "dev.containers.copyGitConfig": false,
+        "dev.containers.dockerCredentialHelper": false,
+        "dev.containers.mountWaylandSocket": false,
+        "git.terminalAuthentication": false,
+        "github.gitAuthentication": false,
+        "git.autofetch": false
+      })
+    | .runArgs = [
+        "--network=" + $net,
+        "--dns=" + $dns1,
+        "--dns=" + $dns2,
+        "--security-opt=no-new-privileges:true",
+        "--sysctl=net.ipv6.conf.all.disable_ipv6=1",
+        "--sysctl=net.ipv6.conf.default.disable_ipv6=1",
+        "--pids-limit=" + $pids,
+        "--memory=" + $mem,
+        "--cpus=" + $cpus,
+        "--tmpfs=/tmp:rw,nosuid,nodev,size=" + $tmpfs + ",mode=1777",
+        "--init"
+      ] + ((.runArgs // []) | map(select((
+          startswith("--network=") or
+          startswith("--dns=") or
+          startswith("--pids-limit=") or
+          startswith("--memory=") or
+          startswith("--cpus=") or
+          startswith("--tmpfs=/tmp:") or
+          startswith("--security-opt=no-new-privileges") or
+          startswith("--sysctl=net.ipv6.conf") or
+          (. == "--init")
+        ) | not)))
+    | .runArgs = (
+        if (.runArgs | any(test("^--cap-drop=(CAP_)?NET_RAW$"))) then
+          .runArgs
+        else
+          .runArgs + ["--cap-drop=NET_RAW"]
+        end
+      )
+    | .mounts = (
+        ((.mounts // []) | map(select(
+          (startswith("source=agy-shared-config") or
+           startswith("source=agy-shared-cache") or
+           startswith("source=agy-cache-") or
+           startswith("source=agy-gemini-data-") or
+           test("(target|destination)=([^,]+/)?\\.devcontainer")) | not
+        ))) as $filtered |
+        [
+          "source=${localWorkspaceFolder}/.devcontainer,target=${containerWorkspaceFolder}/.devcontainer,type=bind,readonly"
+        ] +
+        (if ($shared_cfg != "") then [$shared_cfg] else [] end) +
+        $filtered +
+        [
+          ("source=" + $cache_vol + ",target=/home/vscode/.cache,type=volume"),
+          ("source=" + $proj_vol + ",target=/home/vscode/.gemini,type=volume")
+        ] as $base_m |
+        $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
+      )
+    | .initializeCommand = $init_cmd
+    | .build.args.AGY_VERSION = $ver
+    | .build.args.PATCHER_COMMIT = $patcher_commit
+    | .remoteEnv.AGY_VERSION = $ver
+    | .remoteEnv.AGY_PATCH = $patch
+    | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
+    | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
+    | .remoteEnv.SSH_AUTH_SOCK = ""
+    | .remoteEnv.VSCODE_GIT_IPC_HANDLE = ""
+    | .remoteEnv.VSCODE_GIT_ASKPASS_NODE = ""
+    | .remoteEnv.VSCODE_GIT_ASKPASS_MAIN = ""
+    | .remoteEnv.GIT_ASKPASS = "/bin/false"
+    | .remoteEnv.SSH_ASKPASS = "/bin/false"
+    | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
+    | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
+    | .postStartCommand = (
+        if .postStartCommand then
+          (if (.postStartCommand | contains("vscode-git-*.sock")) then .postStartCommand else (.postStartCommand + "; rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true") end)
+        else
+          "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true"
+        end
+      )
+  '
+
+  jq --arg name "\${localWorkspaceFolderBasename} (${display_name} Sandbox)" \
+     --arg ver "${agy_version}" \
+     --arg patch "${agy_patch}" \
+     --arg patcher_commit "${patcher_commit}" \
+     --arg net "${NETWORK_NAME}" \
+     --arg dns1 "${DNS_PRIMARY}" \
+     --arg dns2 "${DNS_SECONDARY}" \
+     --arg pids "${PIDS_LIMIT}" \
+     --arg mem "${MEMORY_LIMIT}" \
+     --arg cpus "${CPUS_LIMIT}" \
+     --arg tmpfs "${TMPFS_SIZE}" \
+     --arg init_cmd "${init_cmd}" \
+     --arg shared_cfg "${shared_config_mount}" \
+     --arg cache_vol "${cache_volume}" \
+     --arg proj_vol "${project_volume}" \
+     --argjson exts "${exts_json}" \
+     --argjson base_settings "${base_settings}" \
+     --argjson tmpl_settings "${tmpl_settings}" \
+     --argjson extra_mounts "${extra_mounts_json}" \
+     "${jq_filter}" \
+     "${base_json}" > "${output_file}"
 }
 
 assemble_declarative_template() {
@@ -806,7 +801,7 @@ do_init_sandbox() {
   mkdir -p "${dest_devcontainer}"
 
   local extra_mounts_json="[]"
-  if [ ${#extra_mounts[@]} -gt 0 ] && command -v jq >/dev/null 2>&1; then
+  if [ ${#extra_mounts[@]} -gt 0 ]; then
     extra_mounts_json="$(printf '%s\n' "${extra_mounts[@]}" | jq -R . | jq -s .)"
   fi
 
@@ -820,6 +815,10 @@ do_init_sandbox() {
     if [ ! -f "${dest_devcontainer}/install-agy.sh" ]; then
       cp "${ROOT_DIR}/base/install-agy.sh" "${dest_devcontainer}/install-agy.sh"
       chmod +x "${dest_devcontainer}/install-agy.sh"
+    fi
+    if [ ! -f "${dest_devcontainer}/devcontainer.json" ]; then
+      echo "==> [antigravity-sandbox] Custom template lacks devcontainer.json. Deploying secure base/devcontainer.json..."
+      cp "${ROOT_DIR}/base/devcontainer.json" "${dest_devcontainer}/devcontainer.json"
     fi
     local path_hash="default"
     local folder_basename="project"
@@ -841,88 +840,118 @@ do_init_sandbox() {
       shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"
     fi
 
-    if [ -f "${dest_devcontainer}/devcontainer.json" ] && command -v jq >/dev/null 2>&1; then
-      local tmp_dc
-      tmp_dc="$(mktemp)"
-      local custom_filter='
-        del(.capDrop)
-        | .runArgs = [
-          "--network=" + $net,
-          "--dns=" + $dns1,
-          "--dns=" + $dns2,
-          "--pids-limit=" + $pids,
-          "--memory=" + $mem,
-          "--cpus=" + $cpus,
-          "--tmpfs=/tmp:rw,nosuid,nodev,size=" + $tmpfs + ",mode=1777"
-        ] + ((.runArgs // []) | map(select((
-            startswith("--network=") or
-            startswith("--dns=") or
-            startswith("--pids-limit=") or
-            startswith("--memory=") or
-            startswith("--cpus=") or
-            startswith("--tmpfs=/tmp:")
-          ) | not)))
-        | .runArgs = (
-            if (.runArgs | any(test("^--cap-drop=(CAP_)?NET_RAW$"))) then
-              .runArgs
-            else
-              .runArgs + ["--cap-drop=NET_RAW"]
-            end
-          )
-        | .mounts = (
-          ((.mounts // []) | map(select(
-            (startswith("source=agy-shared-config") or
-             startswith("source=agy-shared-cache") or
-             startswith("source=agy-cache-") or
-             startswith("source=agy-gemini-data-")) | not
-          ))) as $filtered |
-          (if ($shared_cfg != "") then [$shared_cfg] else [] end) +
-          $filtered +
-          [
-            ("source=" + $cache_vol + ",target=/home/vscode/.cache,type=volume"),
-            ("source=" + $proj_vol + ",target=/home/vscode/.gemini,type=volume")
-          ] as $base_m |
-          $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
+    local ready_path="${READY_FILE}"
+    local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
+
+    local tmp_dc
+    tmp_dc="$(mktemp)"
+    # shellcheck disable=SC2016
+    local custom_filter='
+      del(.capDrop)
+      | .customizations.vscode.settings = ((.customizations.vscode.settings // {}) * {
+          "dev.containers.copyGitConfig": false,
+          "dev.containers.dockerCredentialHelper": false,
+          "dev.containers.mountWaylandSocket": false,
+          "git.terminalAuthentication": false,
+          "github.gitAuthentication": false,
+          "git.autofetch": false
+        })
+      | .runArgs = [
+        "--network=" + $net,
+        "--dns=" + $dns1,
+        "--dns=" + $dns2,
+        "--security-opt=no-new-privileges:true",
+        "--sysctl=net.ipv6.conf.all.disable_ipv6=1",
+        "--sysctl=net.ipv6.conf.default.disable_ipv6=1",
+        "--pids-limit=" + $pids,
+        "--memory=" + $mem,
+        "--cpus=" + $cpus,
+        "--tmpfs=/tmp:rw,nosuid,nodev,size=" + $tmpfs + ",mode=1777",
+        "--init"
+      ] + ((.runArgs // []) | map(select((
+          startswith("--network=") or
+          startswith("--dns=") or
+          startswith("--pids-limit=") or
+          startswith("--memory=") or
+          startswith("--cpus=") or
+          startswith("--tmpfs=/tmp:") or
+          startswith("--security-opt=no-new-privileges") or
+          startswith("--sysctl=net.ipv6.conf") or
+          (. == "--init")
+        ) | not)))
+      | .runArgs = (
+          if (.runArgs | any(test("^--cap-drop=(CAP_)?NET_RAW$"))) then
+            .runArgs
+          else
+            .runArgs + ["--cap-drop=NET_RAW"]
+          end
         )
-        | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
-        | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
-      '
-      jq --arg net "${NETWORK_NAME}" \
-         --arg dns1 "${DNS_PRIMARY}" \
-         --arg dns2 "${DNS_SECONDARY}" \
-         --arg pids "${PIDS_LIMIT}" \
-         --arg mem "${MEMORY_LIMIT}" \
-         --arg cpus "${CPUS_LIMIT}" \
-         --arg tmpfs "${TMPFS_SIZE}" \
-         --arg shared_cfg "${shared_config_mount}" \
-         --arg cache_vol "${cache_volume}" \
-         --arg proj_vol "${project_volume}" \
-         --argjson extra_mounts "${extra_mounts_json}" \
-         "${custom_filter}" \
-         "${dest_devcontainer}/devcontainer.json" > "${tmp_dc}"
-      mv "${tmp_dc}" "${dest_devcontainer}/devcontainer.json"
-    elif [ -f "${dest_devcontainer}/devcontainer.json" ]; then
-      if [ -n "${shared_config_mount}" ]; then
-        if grep -q "source=agy-shared-config" "${dest_devcontainer}/devcontainer.json"; then
-          sed -i 's|source=agy-shared-config[^",]*|'"${shared_config_mount}"'|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-        else
-          sed -i 's|"mounts": \[|"mounts": \[\n    "'"${shared_config_mount}"'",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-        fi
-      fi
-      if grep -q "target=/home/vscode/.cache" "${dest_devcontainer}/devcontainer.json"; then
-        sed -i -E 's|source=[^",]+,target=/home/vscode/\.cache|source='"${cache_volume}"',target=/home/vscode/.cache|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-      else
-        sed -i 's|"mounts": \[|"mounts": \[\n    "source='"${cache_volume}"',target=/home/vscode/.cache,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-      fi
-      if grep -q "source=agy-gemini-data-" "${dest_devcontainer}/devcontainer.json"; then
-        sed -i -E 's|source=agy-gemini-data-[^",]+|source='"${project_volume}"'|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-      else
-        sed -i 's|"mounts": \[|"mounts": \[\n    "source='"${project_volume}"',target=/home/vscode/.gemini,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-      fi
-      if ! grep -q "UV_CACHE_DIR" "${dest_devcontainer}/devcontainer.json"; then
-        sed -i 's|"remoteEnv": {|"remoteEnv": {\n    "UV_CACHE_DIR": "/home/vscode/.cache/uv",\n    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
-      fi
-    fi
+      | .mounts = (
+        ((.mounts // []) | map(select(
+          (startswith("source=agy-shared-config") or
+           startswith("source=agy-shared-cache") or
+           startswith("source=agy-cache-") or
+           startswith("source=agy-gemini-data-") or
+           test("(target|destination)=([^,]+/)?\\.devcontainer")) | not
+        ))) as $filtered |
+        [
+          "source=${localWorkspaceFolder}/.devcontainer,target=${containerWorkspaceFolder}/.devcontainer,type=bind,readonly"
+        ] +
+        (if ($shared_cfg != "") then [$shared_cfg] else [] end) +
+        $filtered +
+        [
+          ("source=" + $cache_vol + ",target=/home/vscode/.cache,type=volume"),
+          ("source=" + $proj_vol + ",target=/home/vscode/.gemini,type=volume")
+        ] as $base_m |
+        $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
+      )
+      | .initializeCommand = (
+          if .initializeCommand then
+            (if (.initializeCommand | contains("Sandbox network isolation is NOT active")) then .initializeCommand else ($init_cmd + "; " + .initializeCommand) end)
+          else
+            $init_cmd
+          end
+        )
+      | .build.args.AGY_VERSION = (.build.args.AGY_VERSION // $ver)
+      | .build.args.PATCHER_COMMIT = (.build.args.PATCHER_COMMIT // $patcher_commit)
+      | .remoteEnv.AGY_VERSION = (.remoteEnv.AGY_VERSION // $ver)
+      | .remoteEnv.AGY_PATCH = (.remoteEnv.AGY_PATCH // $patch)
+      | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
+      | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
+      | .remoteEnv.SSH_AUTH_SOCK = ""
+      | .remoteEnv.VSCODE_GIT_IPC_HANDLE = ""
+      | .remoteEnv.VSCODE_GIT_ASKPASS_NODE = ""
+      | .remoteEnv.VSCODE_GIT_ASKPASS_MAIN = ""
+      | .remoteEnv.GIT_ASKPASS = "/bin/false"
+      | .remoteEnv.SSH_ASKPASS = "/bin/false"
+      | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
+      | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
+      | .postStartCommand = (
+          if .postStartCommand then
+            (if (.postStartCommand | contains("vscode-git-*.sock")) then .postStartCommand else (.postStartCommand + "; rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true") end)
+          else
+            "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true"
+          end
+        )
+    '
+    jq --arg net "${NETWORK_NAME}" \
+       --arg dns1 "${DNS_PRIMARY}" \
+       --arg dns2 "${DNS_SECONDARY}" \
+       --arg pids "${PIDS_LIMIT}" \
+       --arg mem "${MEMORY_LIMIT}" \
+       --arg cpus "${CPUS_LIMIT}" \
+       --arg tmpfs "${TMPFS_SIZE}" \
+       --arg init_cmd "${init_cmd}" \
+       --arg ver "${agy_version}" \
+       --arg patch "${agy_patch}" \
+       --arg patcher_commit "${patcher_commit}" \
+       --arg shared_cfg "${shared_config_mount}" \
+       --arg cache_vol "${cache_volume}" \
+       --arg proj_vol "${project_volume}" \
+       --argjson extra_mounts "${extra_mounts_json}" \
+       "${custom_filter}" \
+       "${dest_devcontainer}/devcontainer.json" > "${tmp_dc}"
+    mv "${tmp_dc}" "${dest_devcontainer}/devcontainer.json"
   else
     echo "==> [antigravity-sandbox] Assembling declarative template from base..."
     assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}" "${agy_version}" "${agy_patch}" "${extra_mounts_json}" "${patcher_commit}" "${patcher_repo}" "${target_dir}" "${shared_config}" "${shared_cache}"

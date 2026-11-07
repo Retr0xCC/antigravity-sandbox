@@ -580,6 +580,15 @@ if [ -f "${ROOT_DIR}/base/Dockerfile" ]; then
   else
     log_fail "base/Dockerfile: Patcher not pre-cloned at image build time."
   fi
+
+  # 6. Sudo elimination check (VULN-03)
+  if grep -E 'apt-get install.*[[:space:]]sudo([[:space:]]|$)' "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
+    log_fail "base/Dockerfile: sudo package is installed (privilege escalation risk!)."
+  elif grep -q "apt-get purge -y sudo" "${ROOT_DIR}/base/Dockerfile" && grep -q "/etc/sudoers" "${ROOT_DIR}/base/Dockerfile"; then
+    log_pass "base/Dockerfile: sudo package purged and /etc/sudoers removed (strictly rootless container, VULN-03)."
+  else
+    log_warn "base/Dockerfile: sudo purge routine not detected."
+  fi
 else
   log_info "base/Dockerfile not found at ${ROOT_DIR}/base/Dockerfile. Skipping Dockerfile audit."
 fi
@@ -802,6 +811,28 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       log_fail "scripts/init-sandbox.sh: Path hashing for project volume isolation not found."
     fi
 
+    # VULN-03 verification: Fail-Closed jq dependency verification
+    if grep -q "command -v jq" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q "FATAL: 'jq'" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Fail-Closed jq dependency verification enforced at startup (VULN-03)."
+    else
+      log_fail "scripts/init-sandbox.sh: Missing Fail-Closed jq dependency verification (VULN-03 risk!)."
+    fi
+
+    # VULN-03 verification: Full Custom Mode hardening and Dockerfile-only support
+    if grep -q "Custom template lacks devcontainer.json" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Dockerfile-only custom templates automatically receive secured devcontainer.json (VULN-03)."
+    else
+      log_fail "scripts/init-sandbox.sh: Dockerfile-only custom templates do not receive secured devcontainer.json (VULN-03 risk!)."
+    fi
+
+    if grep -q "custom_filter=" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -q -- "--security-opt=no-new-privileges:true" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -q -- "target=\${containerWorkspaceFolder}/.devcontainer,type=bind,readonly" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Full Custom Mode enforces no-new-privileges, readonly .devcontainer, and Fail-Closed initializeCommand (VULN-03)."
+    else
+      log_fail "scripts/init-sandbox.sh: Full Custom Mode lacks complete security filter enforcement (VULN-03 risk!)."
+    fi
+
     # Review command support
     if grep -q -- "--review" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
       log_pass "scripts/init-sandbox.sh: Safe review workflow command (--review) supported."
@@ -823,6 +854,13 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   if [ -n "${active_cid}" ]; then
     c_name=$(docker ps --filter "id=${active_cid}" --format '{{.Names}}' 2>/dev/null || echo "${active_cid:0:12}")
     log_info "Active container detected on '${NETWORK_NAME}': ${c_name} (${active_cid:0:12})"
+
+    # Verify sudo binary is absent in live container (strictly rootless, VULN-03)
+    if docker exec "${active_cid}" which sudo >/dev/null 2>&1; then
+      log_fail "Container: sudo binary exists in container (privilege escalation risk, VULN-03!)."
+    else
+      log_pass "Container: sudo binary is absent (strictly rootless unprivileged container, VULN-03)."
+    fi
 
     # Verify protected system paths inside live container
     if docker exec "${active_cid}" test -f /usr/local/share/agy-sandbox/setup.sh 2>/dev/null; then
@@ -854,7 +892,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 
       # Verify shared configuration symlinks
       symlinks_ok=true
-      for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
+      for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id"; do
         target_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/${s_file}" 2>/dev/null || echo "")
         if [ "${target_link}" = "/home/vscode/.gemini-shared/${s_file}" ]; then
           :
@@ -865,6 +903,14 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       done
       if [ "${symlinks_ok}" = "true" ]; then
         log_pass "Container: Shared configuration symlinks properly link .gemini to .gemini-shared."
+      fi
+
+      # Verify mcp_config.json is NOT symlinked to .gemini-shared (VULN-02)
+      mcp_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/config/mcp_config.json" 2>/dev/null || echo "")
+      if [[ "${mcp_link}" =~ /home/vscode/\.gemini-shared ]]; then
+        log_fail "Container: /home/vscode/.gemini/config/mcp_config.json is linked to shared volume! (Cross-Sandbox RCE risk, VULN-02)."
+      else
+        log_pass "Container: config/mcp_config.json is isolated from shared volume (VULN-02)."
       fi
     else
       log_warn "Container: /home/vscode/.gemini-shared directory missing."

@@ -10,14 +10,13 @@ USER_HOME="${HOME:-/home/vscode}"
 MARKER_FILE="${USER_HOME}/.agy_initialized"
 WORKSPACE_DIR="${1:-${CONTAINER_WORKSPACE_FOLDER:-$(pwd)}}"
 
-# Verify permissions on persisted volumes without requiring sudo (no-new-privileges safe)
+# Verify permissions on persisted volumes without requiring sudo (no-new-privileges safe, VULN-03)
 if [ -d "${USER_HOME}/.gemini" ] && [ ! -w "${USER_HOME}/.gemini" ]; then
-    echo "==> [antigravity-sandbox] Warning: ${USER_HOME}/.gemini is not writable. Attempting non-interactive permissions fix..."
-    sudo -n chown -R vscode:vscode "${USER_HOME}/.gemini" 2>/dev/null || true
+    echo "==> [antigravity-sandbox] Warning: ${USER_HOME}/.gemini is not writable by current user."
 fi
 
 if [ -d "${USER_HOME}/.cache" ] && [ ! -w "${USER_HOME}/.cache" ]; then
-    sudo -n chown -R vscode:vscode "${USER_HOME}/.cache" 2>/dev/null || true
+    echo "==> [antigravity-sandbox] Warning: ${USER_HOME}/.cache is not writable by current user."
 fi
 
 # Ensure cache subdirectories exist

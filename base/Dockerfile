@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     bash-completion \
     jq \
-    sudo \
     python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Enforce strictly rootless unprivileged container: purge sudo and remove sudoers configurations (VULN-03)
+RUN apt-get purge -y sudo 2>/dev/null || true \
+    && rm -rf /etc/sudoers /etc/sudoers.d /usr/bin/sudo /usr/bin/sudoedit /usr/lib/sudo 2>/dev/null || true
 
 # Install uv (astral-sh fast Python package manager) pinned by immutable SHA256 digest
 COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /uvx /bin/
