@@ -46,7 +46,7 @@
 
 ```bash
 # Из корневой директории antigravity-sandbox:
-./scripts/init-sandbox.sh --template affine-mcp --target ~/my-affine-project
+./scripts/init-sandbox.sh ~/my-affine-project affine-mcp
 ```
 
 Затем откройте созданный проект в VS Code:

@@ -138,7 +138,7 @@ while IFS= read -r cid; do
 
   if [ "${state_status}" = "running" ]; then
     if [ -n "${local_folder}" ] && [ ! -d "${local_folder}" ]; then
-      ORPHANED_CONTAINERS+=("${cid}|${c_name}|running (orphaned)|${local_folder}")
+      ACTIVE_CONTAINERS+=("${cid}|${c_name}|running (unmounted workspace)|${local_folder}")
     else
       ACTIVE_CONTAINERS+=("${cid}|${c_name}|${state_status}|${local_folder:-active}")
     fi
@@ -256,12 +256,6 @@ else
         exit 0
       fi
 
-      # Include all orphaned first if user wants
-      for item in "${ORPHANED_CONTAINERS[@]}"; do
-        IFS="|" read -r cid _ _ _ <<< "${item}"
-        TARGET_CIDS_TO_REMOVE+=("${cid}")
-      done
-
       if [ "${selection}" = "all" ]; then
         for item in "${STOPPED_PROJECT_CONTAINERS[@]}"; do
           IFS="|" read -r cid _ _ _ <<< "${item}"
@@ -332,7 +326,7 @@ done
 if [ "${PRUNE_IMAGES}" = "true" ]; then
   echo -n "Pruning dangling build images... "
   docker image prune -f --filter "dangling=true" >/dev/null 2>&1 || true
-  docker image prune -f --filter "label=org.opencontainers.image.title=antigravity-sandbox" >/dev/null 2>&1 || true
+  docker image prune -a -f --filter "label=org.opencontainers.image.title=antigravity-sandbox" >/dev/null 2>&1 || true
   echo -e "${CLR_GREEN}done.${CLR_RESET}"
 fi
 

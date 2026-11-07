@@ -102,14 +102,14 @@ else
     docker network create \
       --driver bridge \
       --subnet "${SUBNET}" \
-      --opt "com.docker.network.bridge.enable_icc=true" \
+      --opt "com.docker.network.bridge.enable_icc=false" \
       --opt "com.docker.network.bridge.name=${BRIDGE_NAME}" \
       "${NETWORK_NAME}"
   else
     echo "==> [antigravity-sandbox] Creating isolated bridge network '${NETWORK_NAME}' (native Docker IPAM) with bridge '${BRIDGE_NAME}'..."
     docker network create \
       --driver bridge \
-      --opt "com.docker.network.bridge.enable_icc=true" \
+      --opt "com.docker.network.bridge.enable_icc=false" \
       --opt "com.docker.network.bridge.name=${BRIDGE_NAME}" \
       "${NETWORK_NAME}"
   fi
@@ -130,8 +130,11 @@ BLOCKED_RANGES=(
   "169.254.0.0/16"
   "172.16.0.0/12"
   "192.0.0.0/24"
+  "192.0.2.0/24"
   "192.168.0.0/16"
   "198.18.0.0/15"
+  "198.51.100.0/24"
+  "203.0.113.0/24"
   "224.0.0.0/4"
   "240.0.0.0/4"
   "255.255.255.255/32"
@@ -140,8 +143,12 @@ BLOCKED_RANGES=(
 # --------------------------------------------------------
 # 1. Linux Kernel Policy Routing (ip rule)
 # --------------------------------------------------------
-if command -v ip >/dev/null 2>&1; then
-  echo "==> [antigravity-sandbox] Configuring Linux Policy Routing (ip rule)..."
+if ! command -v ip >/dev/null 2>&1; then
+  echo "==> [antigravity-sandbox] Fatal Error: 'ip' command not found. Fail-closed." >&2
+  exit 1
+fi
+
+echo "==> [antigravity-sandbox] Configuring Linux Policy Routing (ip rule)..."
 
   # Clean old rules for interface
   for dev in "${ACTIVE_BRIDGE}" "${BRIDGE_NAME}"; do
@@ -179,12 +186,6 @@ if command -v ip >/dev/null 2>&1; then
     done
   done
 
-  # Add rule pref 95: allow intra-subnet traffic (if not already present)
-  snet_pattern="(to ${ACTIVE_SUBNET}|to ${ACTIVE_SUBNET%/32})([[:space:]]|$)"
-  if ! ip rule show 2>/dev/null | grep -E "^95:[[:space:]]+" | grep -F "iif ${ACTIVE_BRIDGE}" | grep -E "${snet_pattern}" | grep -E "lookup (main|254)" >/dev/null 2>&1; then
-    ${SUDO} ip rule add pref 95 iif "${ACTIVE_BRIDGE}" to "${ACTIVE_SUBNET}" lookup main
-  fi
-
   # Add rules pref 100: unreachable for private/special ranges
   for cidr in "${BLOCKED_RANGES[@]}"; do
     cidr_pattern="(to ${cidr}|to ${cidr%/32})([[:space:]]|$)"
@@ -192,51 +193,56 @@ if command -v ip >/dev/null 2>&1; then
       ${SUDO} ip rule add pref 100 iif "${ACTIVE_BRIDGE}" to "${cidr}" unreachable
     fi
   done
-fi
 
 # --------------------------------------------------------
 # 2. Netfilter Isolation (DOCKER-USER & INPUT chains)
 # --------------------------------------------------------
-if command -v iptables >/dev/null 2>&1; then
-  echo "==> [antigravity-sandbox] Configuring Netfilter isolation chains..."
+if ! command -v iptables >/dev/null 2>&1; then
+  echo "==> [antigravity-sandbox] Fatal Error: 'iptables' command not found. Fail-closed." >&2
+  exit 1
+fi
 
-  # Create and flush dedicated chains
-  ${SUDO} iptables -N AGY-SANDBOX-FWD >/dev/null 2>&1 || ${SUDO} iptables -F AGY-SANDBOX-FWD
-  ${SUDO} iptables -N AGY-SANDBOX-IN >/dev/null 2>&1 || ${SUDO} iptables -F AGY-SANDBOX-IN
+echo "==> [antigravity-sandbox] Configuring Netfilter isolation chains..."
 
-  # Populate AGY-SANDBOX-FWD
-  # First rule: allow intra-subnet traffic
-  ${SUDO} iptables -A AGY-SANDBOX-FWD -d "${ACTIVE_SUBNET}" -j RETURN
-  # Blocked ranges
-  for cidr in "${BLOCKED_RANGES[@]}"; do
-    ${SUDO} iptables -A AGY-SANDBOX-FWD -d "${cidr}" -j DROP
-  done
-  # Terminate with RETURN
-  ${SUDO} iptables -A AGY-SANDBOX-FWD -j RETURN
+# Verify DOCKER-USER chain exists before proceeding (Fail-Closed)
+if ! ${SUDO} iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+  echo "==> [antigravity-sandbox] Fatal Error: 'DOCKER-USER' chain not found in iptables filter table. Is Docker daemon running with iptables enabled? Fail-closed." >&2
+  exit 1
+fi
 
-  # Hook into DOCKER-USER
-  if ${SUDO} iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-    # Clean legacy direct rules from DOCKER-USER
-    for old_s in "${ACTIVE_SUBNET}" "${SUBNET}" "172.16.151.0/24"; do
-      [ -z "${old_s}" ] && continue
-      for dest in "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12"; do
-        while ${SUDO} iptables -C DOCKER-USER -s "${old_s}" -d "${dest}" -j DROP >/dev/null 2>&1; do
-          ${SUDO} iptables -D DOCKER-USER -s "${old_s}" -d "${dest}" -j DROP 2>/dev/null || break
-        done
-      done
+# Create and flush dedicated chains
+${SUDO} iptables -N AGY-SANDBOX-FWD >/dev/null 2>&1 || ${SUDO} iptables -F AGY-SANDBOX-FWD
+${SUDO} iptables -N AGY-SANDBOX-IN >/dev/null 2>&1 || ${SUDO} iptables -F AGY-SANDBOX-IN
+
+# Populate AGY-SANDBOX-FWD (no intra-subnet bypasses allowed)
+# Blocked ranges dropped
+for cidr in "${BLOCKED_RANGES[@]}"; do
+  ${SUDO} iptables -A AGY-SANDBOX-FWD -d "${cidr}" -j DROP
+done
+# Terminate with RETURN
+${SUDO} iptables -A AGY-SANDBOX-FWD -j RETURN
+
+# Hook into DOCKER-USER
+# Clean legacy direct rules from DOCKER-USER
+for old_s in "${ACTIVE_SUBNET}" "${SUBNET}" "172.16.151.0/24"; do
+  [ -z "${old_s}" ] && continue
+  for dest in "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12"; do
+    while ${SUDO} iptables -C DOCKER-USER -s "${old_s}" -d "${dest}" -j DROP >/dev/null 2>&1; do
+      ${SUDO} iptables -D DOCKER-USER -s "${old_s}" -d "${dest}" -j DROP 2>/dev/null || break
     done
+  done
+done
 
-    # Remove stale jump if bridge changed
-    if [ "${ACTIVE_BRIDGE}" != "${BRIDGE_NAME}" ]; then
-      while ${SUDO} iptables -C DOCKER-USER -i "${BRIDGE_NAME}" -j AGY-SANDBOX-FWD >/dev/null 2>&1; do
-        ${SUDO} iptables -D DOCKER-USER -i "${BRIDGE_NAME}" -j AGY-SANDBOX-FWD 2>/dev/null || break
-      done
-    fi
+# Remove stale jump if bridge changed
+if [ "${ACTIVE_BRIDGE}" != "${BRIDGE_NAME}" ]; then
+  while ${SUDO} iptables -C DOCKER-USER -i "${BRIDGE_NAME}" -j AGY-SANDBOX-FWD >/dev/null 2>&1; do
+    ${SUDO} iptables -D DOCKER-USER -i "${BRIDGE_NAME}" -j AGY-SANDBOX-FWD 2>/dev/null || break
+  done
+fi
 
-    if ! ${SUDO} iptables -C DOCKER-USER -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD >/dev/null 2>&1; then
-      ${SUDO} iptables -I DOCKER-USER 1 -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD
-    fi
-  fi
+if ! ${SUDO} iptables -C DOCKER-USER -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD >/dev/null 2>&1; then
+  ${SUDO} iptables -I DOCKER-USER 1 -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD
+fi
 
   # Populate AGY-SANDBOX-IN
   ${SUDO} iptables -A AGY-SANDBOX-IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

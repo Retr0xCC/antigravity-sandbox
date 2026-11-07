@@ -58,20 +58,34 @@ verify_archive_checksum() {
   else
     # For custom versions, try querying GitHub API digest if curl and jq are available
     if [ "${version}" != "latest" ] && command -v jq >/dev/null 2>&1; then
-      local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${version}"
-      local api_digest
-      api_digest=$(curl -fsSL "${api_url}" 2>/dev/null | jq -r --arg n "${asset_name}" '.assets[]? | select(.name == $n) | .digest // empty' | sed 's/^sha256://' || true)
+      local clean_v="${version#v}"
+      local api_digest=""
+      for tag in "${version}" "v${clean_v}" "${clean_v}"; do
+        local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${tag}"
+        api_digest=$(curl -fsSL "${api_url}" 2>/dev/null | jq -r --arg n "${asset_name}" '.assets[]? | select(.name == $n) | .digest // empty' | sed 's/^sha256://' || true)
+        [ -n "${api_digest}" ] && break
+      done
+
       if [ -n "${api_digest}" ]; then
         echo "==> [install-agy] Verifying against GitHub Release API digest..."
         local actual_hash
         actual_hash="$(sha256sum "${archive_path}" | awk '{print $1}')"
         if [ "${actual_hash}" != "${api_digest}" ]; then
-          echo "Fatal: SHA256 mismatch against GitHub API digest!" >&2
+          echo "Fatal: SHA256 mismatch against GitHub API digest! Expected: ${api_digest}, Actual: ${actual_hash}" >&2
           rm -f "${archive_path}" 2>/dev/null || true
           return 1
         fi
         echo "==> [install-agy] ✓ SHA256 checksum verified via GitHub API: ${actual_hash:0:16}..."
         return 0
+      fi
+    fi
+
+    # Fail-closed check if SHA256 verification is required (e.g. pinned or explicit)
+    if [ "${REQUIRE_SHA256:-false}" = "true" ] || [ "${AGY_PINNED:-true}" = "true" ]; then
+      if [ "${version}" != "latest" ]; then
+        echo "Fatal: Cryptographic SHA256 digest could not be verified for pinned version '${version}' (${asset_name}). Fail-closed (OPEN-02)." >&2
+        rm -f "${archive_path}" 2>/dev/null || true
+        return 1
       fi
     fi
     echo "==> [install-agy] Notice: No cryptographic SHA256 registered for ${version} (${asset_name})."

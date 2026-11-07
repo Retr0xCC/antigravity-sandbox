@@ -92,9 +92,9 @@
 
 ### Реализация защиты
 
-- **Выделенные цепочки Netfilter (`AGY-SANDBOX-FWD` и `AGY-SANDBOX-IN`):** Фильтрация трафика инкапсулирована в отдельные цепочки, привязанные к `DOCKER-USER` и `INPUT`. Транзитный трафик из моста контейнеров `agy0` во все приватные и спецдиапазоны IPv4 (RFC 1918, CGNAT `100.64.0.0/10`, link-local `169.254.0.0/16`, loopback, multicast, testnets) безусловно сбрасывается (`DROP`). Слушающие порты хоста (SSH, БД, демон Docker) блокируются через `AGY-SANDBOX-IN`, разрешая только DNS хоста (порт 53 UDP/TCP) и установленные сессии (`ESTABLISHED,RELATED`).
+- **Выделенные цепочки Netfilter (`AGY-SANDBOX-FWD` и `AGY-SANDBOX-IN`):** Фильтрация трафика инкапсулирована в отдельные цепочки, привязанные к `DOCKER-USER` и `INPUT`. Транзитный трафик из моста контейнеров `agy0` во все приватные и спецдиапазоны IPv4 (RFC 1918, CGNAT `100.64.0.0/10`, link-local `169.254.0.0/16`, loopback, multicast, testnets RFC 5737) безусловно сбрасывается (`DROP`). Слушающие порты хоста (SSH, БД, демон Docker, DNS на порту 53) полностью блокируются через `AGY-SANDBOX-IN`, разрешая только ранее установленные сессии (`ESTABLISHED,RELATED`). Резолвинг DNS выполняется напрямую через защищенные внешние апстримы Quad9 (`9.9.9.9`, `149.112.112.112`).
 - **Защита Fail-Closed (маркер готовности):** Запуск контейнеров строго требует полностью поднятой и изолированной сети хоста. Скрипт `ensure-network.sh` создает маркер `/run/agy-sandbox/network.ready` только после успешного применения и проверки всех правил Netfilter и RPDB. Как CLI-инициализатор (`init-sandbox.sh`), так и директива `initializeCommand` в Dev Container прерывают запуск в режиме Fail-Closed, если маркер или правила маршрутизации отсутствуют.
-- **Двухуровневая маршрутизация политик ядра Linux (RPDB):** Правила маршрутизации строго привязаны к входящему интерфейсу (`iif agy0`), что гарантирует защиту от утечек трафика даже при активных split-tunnel VPN, переопределяющих таблицу main хоста. Трафик внутри подсети разрешается с приоритетом 95 (`lookup main`), а любые обращения к приватным CIDR назначения сбрасываются с приоритетом 100 (`unreachable`).
+- **Двухуровневая маршрутизация политик ядра Linux (RPDB):** Правила маршрутизации строго привязаны к входящему интерфейсу (`iif agy0`), что гарантирует защиту от утечек трафика даже при активных split-tunnel VPN, переопределяющих таблицу main хоста. Отключено межконтейнерное взаимодействие (`enable_icc=false`), а любые обращения к приватным и специальным CIDR назначения сбрасываются с приоритетом 100 (`unreachable`).
 - **Предсобранный оффлайн-патчер и Supply Chain Pinning:** При сборке Docker-образа внешние зависимости фиксируются неизменяемыми хэшами (`ghcr.io/astral-sh/uv` по sha256, `QNIX-Dev/eligibility-antigravity-patcher` по коммиту `90498f50353d414232f593dffe88899bc80b6312`). Патчер предварительно устанавливается в защищенный системный каталог `/usr/local/share/agy-sandbox/patcher` (владелец `root:root`). При старте контейнера `setup.sh` применяет патчер полностью автономно без `git clone` и без доступа к сети.
 - **Блокировка проброса учетных данных хоста, сокетов и IPC (VULN-04 & NEW-05):**
   - *Настройки хоста vs контейнера:* Опции `dev.containers.copyGitConfig`, `dev.containers.dockerCredentialHelper`, `dev.containers.mountWaylandSocket` и `dev.containers.forwardGpg` считываются расширением Dev Containers на стороне **хоста** до старта контейнера. В руководстве и скрипте `diagnose.sh` автоматизирован аудит User Settings хоста (`~/.config/Code/User/settings.json`) с проверкой отключения этих параметров на хосте.
@@ -166,11 +166,11 @@ agy-sandbox /path/to/project [шаблон] -v 1.5.3
   -h, --help                     Справка
 
 Примеры:
-  agy-sandbox /path/to/project node
-  agy-sandbox --worktree /path/to/project python
+  agy-sandbox /path/to/project default
+  agy-sandbox --worktree /path/to/project math-labs
   agy-sandbox --worktree --worktree-branch experiment-1 /path/to/project
   agy-sandbox --review /path/to/project agy-sandbox
-  agy-sandbox --mount /tmp/datasets:/data:ro /path/to/project
+  agy-sandbox --mount /srv/datasets:/data:ro /path/to/project
 ```
 
 #### Рекомендуемая настройка VS Code / Cursor на хосте (Zero-Trust)
@@ -260,7 +260,8 @@ agy-sandbox --mount /var/data/output:/output:rw /path/to/project
 
 Доступные профили шаблонов:
 - `default` (по умолчанию) — Базовое чистое окружение: antigravity-cli, uv, git и стандартный набор утилит сборки.
-- `rpi-edge-node` — Профиль для автоматизации граничных узлов и шлюзов с Ansible (2.15+), `ansible-lint`, `yamllint`, коллекцией `community.general`, Go (1.22+), клиентом OpenSSH и расширениями VS Code (`redhat.ansible`, `golang.go`, `redhat.vscode-yaml`, `even-better-toml`, `samuelcolvin.jinjahtml` для шаблонов Jinja2 `.j2`).
+- `affine-mcp` — Профиль для интеграции с AFFiNE Cloud и внешними инстансами через MCP (Node.js 22 LTS, affine-mcp-server 3.11.0, интерактивный мастер `affine-setup`).
+- `rpi-edge-node` — Профиль для автоматизации граничных узлов и шлюзов с Ansible (2.18+), `ansible-lint`, `yamllint`, коллекцией `community.general`, Go (1.22+), клиентом OpenSSH и расширениями VS Code (`redhat.ansible`, `golang.go`, `redhat.vscode-yaml`, `even-better-toml`, `samuelcolvin.jinjahtml` для шаблонов Jinja2 `.j2`).
 - `math-labs` — Профиль для математических вычислений и анализа данных с Python, Jupyter (`ms-toolsai.jupyter`), просмотрщиком PDF (`tomoki1207.pdf`), NumPy, SciPy, Matplotlib, SymPy и pandas.
 
 ---
@@ -337,8 +338,8 @@ agy-sandbox diagnose
 Диагностика проверяет 8 комплексных контрольных точек безопасности:
 1. **Docker Engine, сеть моста (`agy_net`) и маркер готовности:** Проверка отклика демона Docker, динамическое определение назначенной подсети, сопоставление интерфейса `agy0` и проверка наличия файла `/run/agy-sandbox/network.ready`.
 2. **Сетевой интерфейс ядра (`agy0`):** Подтверждение существования интерфейса моста и его состояния в ядре.
-3. **Маршрутизация политик ядра Linux (`ip rule`):** Проверка правила приоритета 95 для внутриподсеточного трафика (`lookup main`) и правил приоритета 100 `unreachable` для всех 12 приватных/специальных диапазонов IPv4, строго привязанных к интерфейсу `iif agy0`.
-4. **Фильтрация пакетов Netfilter (`iptables` / `ip6tables`):** Проверка переходов в кастомные цепочки `AGY-SANDBOX-FWD` и `AGY-SANDBOX-IN`, внутриподсеточного правила `RETURN`, блокировок DROP для всех 12 диапазонов и ограничения доступа к хосту (разрешен только DNS на порту 53).
+3. **Маршрутизация политик ядра Linux (`ip rule`):** Проверка правил приоритета 100 `unreachable` для всех 15 приватных/специальных диапазонов IPv4 (включая RFC 5737 testnets), строго привязанных к интерфейсу `iif agy0`, и отсутствия внутриподсеточных обходов.
+4. **Фильтрация пакетов Netfilter (`iptables` / `ip6tables`):** Проверка переходов в кастомные цепочки `AGY-SANDBOX-FWD` и `AGY-SANDBOX-IN`, блокировок DROP для всех 15 диапазонов и полной блокировки доступа к портам хоста (включая порт 53).
 5. **Рубеж IPv6 и персистентность Systemd:** Аудит отключения IPv6 (`disable_ipv6` на `agy0`), доступность ip6tables и подтверждение неизменяемости файлов сервиса в `/usr/local/lib/agy-sandbox/`.
 6. **Supply Chain Pinning и целостность образа:** Проверка неизменяемого sha256 хэша для `uv`, пиннинга коммита патчера, непривилегированных прав на тома, защищенного размещения скриптов в `/usr/local/share/agy-sandbox/` и поддержки `safe.directory` для git worktree.
 7. **Спецификация Dev Container и рантайм-харденинг:** Статический аудит флагов блокировки учетных данных хоста, нейтрализации Askpass/IPC, Fail-Closed проверки `initializeCommand`, параметров безопасности `runArgs`, readonly-маунта `.devcontainer` и флагов CLI (`--worktree`, `--mount`).
@@ -416,7 +417,7 @@ Antigravity Sandbox реализует многоуровневую глубок
 | :--- | :--- | :--- |
 | **Сканирование локальной сети (LAN) и интранета** | Маршрутизация ядра RPDB (`iif agy0` приоритет 100 `unreachable`) и Netfilter `AGY-SANDBOX-FWD` DROP | **100% Заблокировано** (на уровне ядра) |
 | **Кража метаданных облака (`169.254.169.254`)** | Явный сброс маршрутов и фильтрация link-local диапазонов в firewall | **100% Заблокировано** |
-| **Доступ к службам хоста (SSH, БД, Ollama, сокет Docker)** | Netfilter `AGY-SANDBOX-IN` DROP на интерфейсе `agy0` (разрешен только DNS на порту 53) | **100% Заблокировано** |
+| **Доступ к службам хоста (SSH, БД, Ollama, сокет Docker)** | Netfilter `AGY-SANDBOX-IN` DROP на интерфейсе `agy0` (100% портов хоста заблокировано, включая порт 53; DNS направляется на внешние Quad9) | **100% Заблокировано** |
 | **Утечка учетных данных хоста, сокетов (SSH, Git, Wayland, GPG) и IPC** | Очистка и разоружение сокетов (`chmod 000` для Wayland/GPG/IPC) на `postStartCommand`/`postAttachCommand`, очистка `.docker/config.json`, санация `~/.gitconfig` с сохранением `user.name`/`user.email`, обнуление `remoteEnv`, отключение `remote.autoForwardPorts`, аудит настроек хоста в `diagnose.sh` | **Нейтрализовано в контейнере / Рекомендуются настройки хоста** |
 | **Повышение привилегий до root внутри контейнера** | Полное удаление `sudo` и `/etc/sudoers*` из образа, принудительный флаг `--security-opt=no-new-privileges:true`, вырезание `privileged: true` и `capAdd` в Full Custom Mode | **100% Исключено** (Rootless) |
 | **Побег из контейнера и эксплуатация уязвимостей ядра** | `--security-opt=no-new-privileges:true`, `--cap-drop=NET_RAW`, непривилегированный пользователь `vscode`, лимиты pids/memory/cpus | **Защищено** |
@@ -475,9 +476,6 @@ Antigravity Sandbox реализует многоуровневую глубок
 
 ```text
 antigravity-sandbox/
-├── .devcontainer/                  # Конфигурация Dev Container для разработки самой песочницы
-├── .github/workflows/
-│   └── docker-publish.yml          # Сборка multi-arch образов (linux/amd64, linux/arm64)
 ├── base/
 │   ├── devcontainer.json           # Базовая спецификация Dev Container
 │   ├── Dockerfile                  # Базовый Docker-образ

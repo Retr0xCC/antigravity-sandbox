@@ -128,8 +128,11 @@ BLOCKED_RANGES=(
   "169.254.0.0/16"
   "172.16.0.0/12"
   "192.0.0.0/24"
+  "192.0.2.0/24"
   "192.168.0.0/16"
   "198.18.0.0/15"
+  "198.51.100.0/24"
+  "203.0.113.0/24"
   "224.0.0.0/4"
   "240.0.0.0/4"
   "255.255.255.255/32"
@@ -346,6 +349,13 @@ else
       else
         log_info "Docker network uses dynamic bridge '${ACTIVE_BRIDGE}'."
       fi
+
+      icc_opt=$(docker network inspect "${NETWORK_NAME}" --format '{{index .Options "com.docker.network.bridge.enable_icc"}}' 2>/dev/null || echo "")
+      if [ "${icc_opt}" = "false" ]; then
+        log_pass "Docker network inter-container communication disabled (enable_icc=false, OPEN-01)."
+      else
+        log_warn "Docker network inter-container communication enabled (enable_icc=${icc_opt:-true}). Re-run ensure-network.sh to isolate sandboxes."
+      fi
     else
       log_fail "Docker network '${NETWORK_NAME}' does not exist. Run ensure-network.sh."
     fi
@@ -375,15 +385,22 @@ echo ""
 # --------------------------------------------------------
 echo -e "${CLR_BOLD}[3/8] Linux Kernel Policy Routing (ip rule)${CLR_RESET}"
 if command -v ip >/dev/null 2>&1; then
-  rules_dump=$(${SUDO} ip rule show 2>/dev/null || ip rule show 2>/dev/null || echo "")
+  rules_dump=$(${SUDO} ip rule show 2>/dev/null | grep -v "\[detached\]" || ip rule show 2>/dev/null | grep -v "\[detached\]" || echo "")
 
-  # Rule pref 95: Intra-subnet lookup main bound to iif
-  # Note: ip rule show prints 'to <dest>' before 'iif <dev>', and /32 is omitted by iproute2 for host bit length
+  # Verify absence of detached rules (OPEN-01)
+  detached_rules=$(${SUDO} ip rule show 2>/dev/null | grep "\[detached\]" || ip rule show 2>/dev/null | grep "\[detached\]" || echo "")
+  if [ -n "${detached_rules}" ]; then
+    log_fail "Kernel RPDB contains detached/stale rules (OPEN-01)!"
+  else
+    log_pass "Kernel RPDB rules free of detached/stale entries."
+  fi
+
+  # Rule pref 95 check: Intra-subnet lookup main should NOT be present (OPEN-01)
   snet_pattern="(to ${ACTIVE_SUBNET}|to ${ACTIVE_SUBNET%/32})([[:space:]]|$)"
   if echo "${rules_dump}" | grep -E "^95:[[:space:]]+" | grep -F "iif ${ACTIVE_BRIDGE}" | grep -E "${snet_pattern}" | grep -E "lookup (main|254)" >/dev/null 2>&1; then
-    log_pass "Rule prio 95: Intra-subnet traffic routing allowed (iif ${ACTIVE_BRIDGE} to ${ACTIVE_SUBNET} lookup main)."
+    log_warn "Rule prio 95: Intra-subnet lookup main is present on ${ACTIVE_BRIDGE}. Re-run ensure-network.sh to close intra-/16 route leaks (OPEN-01)."
   else
-    log_fail "Rule prio 95: Missing intra-subnet rule (iif ${ACTIVE_BRIDGE} to ${ACTIVE_SUBNET} lookup main)."
+    log_pass "No intra-subnet routing bypass rules detected (strictly isolated boundary, OPEN-01)."
   fi
 
   # Rules pref 100: Outbound unreachable for blocked ranges
@@ -398,7 +415,7 @@ if command -v ip >/dev/null 2>&1; then
     fi
   done
   if [ "${local_all_100_ok}" = "true" ]; then
-    log_pass "Rule prio 100: All 12 private/special ranges marked unreachable for iif ${ACTIVE_BRIDGE}."
+    log_pass "Rule prio 100: All 15 private/special ranges marked unreachable for iif ${ACTIVE_BRIDGE}."
   fi
 
   # Check for legacy 'from <subnet>' rules
@@ -432,15 +449,15 @@ if command -v iptables >/dev/null 2>&1; then
       log_fail "DOCKER-USER chain: Missing jump to AGY-SANDBOX-FWD for ${ACTIVE_BRIDGE}."
     fi
   else
-    log_warn "DOCKER-USER chain not found in iptables filter table."
+    log_fail "DOCKER-USER chain not found in iptables filter table (OPEN-01/OPEN-04)."
   fi
 
   # 4b: Dedicated AGY-SANDBOX-FWD chain
   if ${SUDO} iptables -L AGY-SANDBOX-FWD -n >/dev/null 2>&1; then
     if ${SUDO} iptables -C AGY-SANDBOX-FWD -d "${ACTIVE_SUBNET}" -j RETURN >/dev/null 2>&1; then
-      log_pass "AGY-SANDBOX-FWD chain: Intra-subnet traffic RETURN rule verified (${ACTIVE_SUBNET})."
+      log_warn "AGY-SANDBOX-FWD chain: Intra-subnet RETURN rule present for ${ACTIVE_SUBNET}. Re-run ensure-network.sh to close intra-/16 route leaks (OPEN-01)."
     else
-      log_fail "AGY-SANDBOX-FWD chain: Missing intra-subnet RETURN rule for ${ACTIVE_SUBNET}."
+      log_pass "AGY-SANDBOX-FWD chain: No intra-subnet RETURN bypass rule present (OPEN-01)."
     fi
 
     local_fwd_drop_ok=true
@@ -451,7 +468,7 @@ if command -v iptables >/dev/null 2>&1; then
       fi
     done
     if [ "${local_fwd_drop_ok}" = "true" ]; then
-      log_pass "AGY-SANDBOX-FWD chain: DROP rules active for all 12 private/special ranges."
+      log_pass "AGY-SANDBOX-FWD chain: DROP rules active for all 15 private/special ranges."
     fi
   else
     log_fail "AGY-SANDBOX-FWD chain does not exist in iptables."
@@ -1002,167 +1019,170 @@ echo ""
 # --------------------------------------------------------
 echo -e "${CLR_BOLD}[8/8] Container Egress Boundary Tests (TCP/HTTP Probes)${CLR_RESET}"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  active_cid=$(docker ps --filter "network=${NETWORK_NAME}" --format '{{.ID}}' 2>/dev/null | head -n1 || echo "")
-  if [ -n "${active_cid}" ]; then
-    c_name=$(docker ps --filter "id=${active_cid}" --format '{{.Names}}' 2>/dev/null || echo "${active_cid:0:12}")
-    log_info "Active container detected on '${NETWORK_NAME}': ${c_name} (${active_cid:0:12})"
+  mapfile -t active_cids < <(docker ps --filter "network=${NETWORK_NAME}" --format '{{.ID}}' 2>/dev/null || true)
+  if [ ${#active_cids[@]} -gt 0 ]; then
+    for active_cid in "${active_cids[@]}"; do
+      [ -z "${active_cid}" ] && continue
+      c_name=$(docker ps --filter "id=${active_cid}" --format '{{.Names}}' 2>/dev/null || echo "${active_cid:0:12}")
+      log_info "Auditing active container on '${NETWORK_NAME}': ${c_name} (${active_cid:0:12})"
 
-    # Verify sudo binary is absent in live container (strictly rootless, VULN-03)
-    if docker exec "${active_cid}" which sudo >/dev/null 2>&1; then
-      log_fail "Container: sudo binary exists in container (privilege escalation risk, VULN-03!)."
-    else
-      log_pass "Container: sudo binary is absent (strictly rootless unprivileged container, VULN-03)."
-    fi
-
-    # Verify protected system paths inside live container
-    if docker exec "${active_cid}" test -f /usr/local/share/agy-sandbox/setup.sh 2>/dev/null; then
-      s_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /usr/local/share/agy-sandbox/setup.sh 2>/dev/null || echo "unknown")
-      if [ "${s_owner}" = "root:root" ]; then
-        log_pass "Container: /usr/local/share/agy-sandbox/setup.sh is owned by root:root."
+      # Verify sudo binary is absent in live container (strictly rootless, VULN-03)
+      if docker exec "${active_cid}" which sudo >/dev/null 2>&1; then
+        log_fail "Container (${c_name}): sudo binary exists in container (privilege escalation risk, VULN-03!)."
       else
-        log_fail "Container: /usr/local/share/agy-sandbox/setup.sh owned by '${s_owner}' (expected root:root)."
-      fi
-    fi
-
-    if docker exec "${active_cid}" test -d /usr/local/share/agy-sandbox/patcher 2>/dev/null; then
-      p_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /usr/local/share/agy-sandbox/patcher 2>/dev/null || echo "unknown")
-      if [ "${p_owner}" = "root:root" ]; then
-        log_pass "Container: /usr/local/share/agy-sandbox/patcher is owned by root:root."
-      else
-        log_fail "Container: /usr/local/share/agy-sandbox/patcher owned by '${p_owner}' (expected root:root)."
-      fi
-    fi
-
-    # Verify /home/vscode/.gemini-shared volume and ownership in live container
-    if docker exec "${active_cid}" test -d /home/vscode/.gemini-shared 2>/dev/null; then
-      sh_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /home/vscode/.gemini-shared 2>/dev/null || echo "unknown")
-      if [ "${sh_owner}" = "vscode:vscode" ]; then
-        log_pass "Container: /home/vscode/.gemini-shared exists and is owned by vscode:vscode."
-      else
-        log_fail "Container: /home/vscode/.gemini-shared owned by '${sh_owner}' (expected vscode:vscode)."
+        log_pass "Container (${c_name}): sudo binary is absent (strictly rootless unprivileged container, VULN-03)."
       fi
 
-      # Verify shared configuration independent instances (Copy-on-Initialize, VULN-02 & NEW-04)
-      local symlinks_found=false
-      for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
-        if docker exec "${active_cid}" test -L "/home/vscode/.gemini/${s_file}" 2>/dev/null; then
-          symlinks_found=true
-          log_fail "Container: /home/vscode/.gemini/${s_file} is a symlink (VULN-02 violation)!"
-        fi
-      done
-      if [ "${symlinks_found}" = "false" ]; then
-        log_pass "Container: .gemini configuration files are independent instances (Copy-on-Initialize, VULN-02)."
-      fi
-
-      # Verify mcp_config.json is NOT symlinked to .gemini-shared (VULN-02)
-      mcp_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/config/mcp_config.json" 2>/dev/null || echo "")
-      if [[ "${mcp_link}" =~ /home/vscode/\.gemini-shared ]]; then
-        log_fail "Container: /home/vscode/.gemini/config/mcp_config.json is linked to shared volume! (Cross-Sandbox RCE risk, VULN-02)."
-      else
-        log_pass "Container: config/mcp_config.json is isolated from shared volume (VULN-02)."
-      fi
-    else
-      log_warn "Container: /home/vscode/.gemini-shared directory missing."
-    fi
-
-    # Verify /home/vscode/.cache volume, ownership, writability, and subdirectories in live container
-    if docker exec "${active_cid}" test -d /home/vscode/.cache 2>/dev/null; then
-      cache_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /home/vscode/.cache 2>/dev/null || echo "unknown")
-      if [ "${cache_owner}" = "vscode:vscode" ]; then
-        log_pass "Container: /home/vscode/.cache exists and is owned by vscode:vscode."
-      else
-        log_warn "Container: /home/vscode/.cache owned by '${cache_owner}' (expected vscode:vscode)."
-      fi
-
-      if docker exec -u vscode "${active_cid}" test -w /home/vscode/.cache 2>/dev/null; then
-        log_pass "Container: /home/vscode/.cache is writable by vscode."
-      else
-        log_fail "Container: /home/vscode/.cache is NOT writable by vscode."
-      fi
-
-      cache_subdirs_ok=true
-      for sdir in "uv" "agy-downloads"; do
-        if docker exec "${active_cid}" test -d "/home/vscode/.cache/${sdir}" 2>/dev/null; then
-          :
+      # Verify protected system paths inside live container
+      if docker exec "${active_cid}" test -f /usr/local/share/agy-sandbox/setup.sh 2>/dev/null; then
+        s_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /usr/local/share/agy-sandbox/setup.sh 2>/dev/null || echo "unknown")
+        if [ "${s_owner}" = "root:root" ]; then
+          log_pass "Container (${c_name}): /usr/local/share/agy-sandbox/setup.sh is owned by root:root."
         else
-          cache_subdirs_ok=false
-          log_fail "Container: /home/vscode/.cache/${sdir} directory missing."
+          log_fail "Container (${c_name}): /usr/local/share/agy-sandbox/setup.sh owned by '${s_owner}' (expected root:root)."
         fi
-      done
-      if [ "${cache_subdirs_ok}" = "true" ]; then
-        log_pass "Container: /home/vscode/.cache contains uv and agy-downloads directories."
-      fi
-    else
-      log_fail "Container: /home/vscode/.cache directory missing."
-    fi
-
-    # Stage 3 Live container inspection (docker inspect)
-    c_inspect=$(docker inspect "${active_cid}" 2>/dev/null || echo "[]")
-    if [ "${c_inspect}" != "[]" ]; then
-      if echo "${c_inspect}" | jq -e '.[0].HostConfig.SecurityOpt // [] | any(test("^no-new-privileges(:true|=true)?$"))' >/dev/null 2>&1; then
-        log_pass "Container: HostConfig.SecurityOpt contains 'no-new-privileges:true'."
-      else
-        log_warn "Container: HostConfig.SecurityOpt missing 'no-new-privileges:true'."
       fi
 
-      if echo "${c_inspect}" | jq -e '.[0].HostConfig.CapDrop // [] | any(ascii_upcase | test("^(CAP_)?(NET_RAW|ALL)$"))' >/dev/null 2>&1; then
-        log_pass "Container: HostConfig.CapDrop drops NET_RAW."
-      else
-        log_warn "Container: HostConfig.CapDrop does not contain NET_RAW."
-      fi
-
-      # Direct kernel capability inspection (/proc/1/status CapBnd)
-      live_capbnd=$(docker exec "${active_cid}" grep -E '^CapBnd:' /proc/1/status 2>/dev/null | awk '{print $2}' || echo "")
-      if [ -n "${live_capbnd}" ]; then
-        if [ $(( (0x${live_capbnd} >> 13) & 1 )) -eq 0 ]; then
-          log_pass "Container: Kernel bounding set (CapBnd) confirms CAP_NET_RAW dropped."
+      if docker exec "${active_cid}" test -d /usr/local/share/agy-sandbox/patcher 2>/dev/null; then
+        p_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /usr/local/share/agy-sandbox/patcher 2>/dev/null || echo "unknown")
+        if [ "${p_owner}" = "root:root" ]; then
+          log_pass "Container (${c_name}): /usr/local/share/agy-sandbox/patcher is owned by root:root."
         else
-          log_warn "Container: Kernel bounding set (CapBnd) has CAP_NET_RAW enabled (0x${live_capbnd})."
+          log_fail "Container (${c_name}): /usr/local/share/agy-sandbox/patcher owned by '${p_owner}' (expected root:root)."
         fi
       fi
 
-      pids_lim=$(echo "${c_inspect}" | jq -r '.[0].HostConfig.PidsLimit // 0' 2>/dev/null || echo "0")
-      if [ "${pids_lim}" -gt 0 ]; then
-        log_pass "Container: HostConfig.PidsLimit enforced (${pids_lim})."
-      else
-        log_warn "Container: HostConfig.PidsLimit not enforced (${pids_lim})."
-      fi
+      # Verify /home/vscode/.gemini-shared volume and ownership in live container
+      if docker exec "${active_cid}" test -d /home/vscode/.gemini-shared 2>/dev/null; then
+        sh_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /home/vscode/.gemini-shared 2>/dev/null || echo "unknown")
+        if [ "${sh_owner}" = "vscode:vscode" ]; then
+          log_pass "Container (${c_name}): /home/vscode/.gemini-shared exists and is owned by vscode:vscode."
+        else
+          log_fail "Container (${c_name}): /home/vscode/.gemini-shared owned by '${sh_owner}' (expected vscode:vscode)."
+        fi
 
-      devcont_ro=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | endswith("/.devcontainer")) | .RW' 2>/dev/null || echo "")
-      if [ "${devcont_ro}" = "false" ]; then
-        log_pass "Container: .devcontainer mount is strictly Read-Only (RW: false)."
-      elif [ "${devcont_ro}" = "true" ]; then
-        log_fail "Container: .devcontainer mount is writable (RW: true, F17 risk!)."
-      else
-        log_info "Container: .devcontainer dedicated mount not detected in container Mounts."
-      fi
-
-      cache_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination == "/home/vscode/.cache") | .Name // .Source' 2>/dev/null || echo "")
-      if [ -n "${cache_mount}" ]; then
-        log_pass "Container: /home/vscode/.cache is mounted (${cache_mount})."
-      else
-        log_fail "Container: /home/vscode/.cache is NOT mounted."
-      fi
-
-      # Stage 4 Git repository metadata mounts protection (FEAT-01, VULN-01)
-      has_git_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | test("/\\.git(/.*)?$")) | .Destination' 2>/dev/null | head -n1 || echo "")
-      if [ -n "${has_git_mount}" ]; then
-        log_info "Container: Git metadata bind mounts detected. Auditing protections..."
-        for sub in "hooks" "config" "info"; do
-          sub_rw=$(echo "${c_inspect}" | jq -r --arg s "/.git/${sub}" '.[0].Mounts[]? | select(.Destination | endswith($s)) | .RW' 2>/dev/null || echo "")
-          if [ "${sub_rw}" = "false" ]; then
-            log_pass "Container: .git/${sub} mount is strictly Read-Only (RW: false, FEAT-01 / VULN-01)."
-          elif [ "${sub_rw}" = "true" ]; then
-            log_fail "Container: .git/${sub} mount is WRITABLE (RW: true, host RCE risk!)."
-          else
-            log_warn "Container: .git/${sub} dedicated Read-Only mount not detected in container Mounts."
+        # Verify shared configuration independent instances (Copy-on-Initialize, VULN-02 & NEW-04)
+        local symlinks_found=false
+        for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
+          if docker exec "${active_cid}" test -L "/home/vscode/.gemini/${s_file}" 2>/dev/null; then
+            symlinks_found=true
+            log_fail "Container (${c_name}): /home/vscode/.gemini/${s_file} is a symlink (VULN-02 violation)!"
           fi
         done
-      fi
-    fi
+        if [ "${symlinks_found}" = "false" ]; then
+          log_pass "Container (${c_name}): .gemini configuration files are independent instances (Copy-on-Initialize, VULN-02)."
+        fi
 
-    gw_ip=$(echo "${ACTIVE_SUBNET}" | sed -E 's/\.[0-9]+\/[0-9]+$/\.1/')
-    audit_egress_isolation "docker exec ${active_cid}" "${gw_ip}"
+        # Verify mcp_config.json is NOT symlinked to .gemini-shared (VULN-02)
+        mcp_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/config/mcp_config.json" 2>/dev/null || echo "")
+        if [[ "${mcp_link}" =~ /home/vscode/\.gemini-shared ]]; then
+          log_fail "Container (${c_name}): /home/vscode/.gemini/config/mcp_config.json is linked to shared volume! (Cross-Sandbox RCE risk, VULN-02)."
+        else
+          log_pass "Container (${c_name}): config/mcp_config.json is isolated from shared volume (VULN-02)."
+        fi
+      else
+        log_warn "Container (${c_name}): /home/vscode/.gemini-shared directory missing."
+      fi
+
+      # Verify /home/vscode/.cache volume, ownership, writability, and subdirectories in live container
+      if docker exec "${active_cid}" test -d /home/vscode/.cache 2>/dev/null; then
+        cache_owner=$(docker exec "${active_cid}" stat -c "%U:%G" /home/vscode/.cache 2>/dev/null || echo "unknown")
+        if [ "${cache_owner}" = "vscode:vscode" ]; then
+          log_pass "Container (${c_name}): /home/vscode/.cache exists and is owned by vscode:vscode."
+        else
+          log_warn "Container (${c_name}): /home/vscode/.cache owned by '${cache_owner}' (expected vscode:vscode)."
+        fi
+
+        if docker exec -u vscode "${active_cid}" test -w /home/vscode/.cache 2>/dev/null; then
+          log_pass "Container (${c_name}): /home/vscode/.cache is writable by vscode."
+        else
+          log_fail "Container (${c_name}): /home/vscode/.cache is NOT writable by vscode."
+        fi
+
+        cache_subdirs_ok=true
+        for sdir in "uv" "agy-downloads"; do
+          if docker exec "${active_cid}" test -d "/home/vscode/.cache/${sdir}" 2>/dev/null; then
+            :
+          else
+            cache_subdirs_ok=false
+            log_fail "Container (${c_name}): /home/vscode/.cache/${sdir} directory missing."
+          fi
+        done
+        if [ "${cache_subdirs_ok}" = "true" ]; then
+          log_pass "Container (${c_name}): /home/vscode/.cache contains uv and agy-downloads directories."
+        fi
+      else
+        log_fail "Container (${c_name}): /home/vscode/.cache directory missing."
+      fi
+
+      # Stage 3 Live container inspection (docker inspect)
+      c_inspect=$(docker inspect "${active_cid}" 2>/dev/null || echo "[]")
+      if [ "${c_inspect}" != "[]" ]; then
+        if echo "${c_inspect}" | jq -e '.[0].HostConfig.SecurityOpt // [] | any(test("^no-new-privileges(:true|=true)?$"))' >/dev/null 2>&1; then
+          log_pass "Container (${c_name}): HostConfig.SecurityOpt contains 'no-new-privileges:true'."
+        else
+          log_fail "Container (${c_name}): HostConfig.SecurityOpt missing 'no-new-privileges:true' (OPEN-04)."
+        fi
+
+        if echo "${c_inspect}" | jq -e '.[0].HostConfig.CapDrop // [] | any(ascii_upcase | test("^(CAP_)?(NET_RAW|ALL)$"))' >/dev/null 2>&1; then
+          log_pass "Container (${c_name}): HostConfig.CapDrop drops NET_RAW."
+        else
+          log_fail "Container (${c_name}): HostConfig.CapDrop does not contain NET_RAW (OPEN-04)."
+        fi
+
+        # Direct kernel capability inspection (/proc/1/status CapBnd)
+        live_capbnd=$(docker exec "${active_cid}" grep -E '^CapBnd:' /proc/1/status 2>/dev/null | awk '{print $2}' || echo "")
+        if [ -n "${live_capbnd}" ]; then
+          if [ $(( (0x${live_capbnd} >> 13) & 1 )) -eq 0 ]; then
+            log_pass "Container (${c_name}): Kernel bounding set (CapBnd) confirms CAP_NET_RAW dropped."
+          else
+            log_fail "Container (${c_name}): Kernel bounding set (CapBnd) has CAP_NET_RAW enabled (0x${live_capbnd}, OPEN-04)."
+          fi
+        fi
+
+        pids_lim=$(echo "${c_inspect}" | jq -r '.[0].HostConfig.PidsLimit // 0' 2>/dev/null || echo "0")
+        if [ "${pids_lim}" -gt 0 ]; then
+          log_pass "Container (${c_name}): HostConfig.PidsLimit enforced (${pids_lim})."
+        else
+          log_fail "Container (${c_name}): HostConfig.PidsLimit not enforced (${pids_lim}, OPEN-04)."
+        fi
+
+        devcont_ro=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | endswith("/.devcontainer")) | .RW' 2>/dev/null || echo "")
+        if [ "${devcont_ro}" = "false" ]; then
+          log_pass "Container (${c_name}): .devcontainer mount is strictly Read-Only (RW: false)."
+        elif [ "${devcont_ro}" = "true" ]; then
+          log_fail "Container (${c_name}): .devcontainer mount is writable (RW: true, F17 risk!)."
+        else
+          log_info "Container (${c_name}): .devcontainer dedicated mount not detected in container Mounts."
+        fi
+
+        cache_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination == "/home/vscode/.cache") | .Name // .Source' 2>/dev/null || echo "")
+        if [ -n "${cache_mount}" ]; then
+          log_pass "Container (${c_name}): /home/vscode/.cache is mounted (${cache_mount})."
+        else
+          log_fail "Container (${c_name}): /home/vscode/.cache is NOT mounted."
+        fi
+
+        # Stage 4 Git repository metadata mounts protection (FEAT-01, VULN-01)
+        has_git_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | test("/\\.git(/.*)?$")) | .Destination' 2>/dev/null | head -n1 || echo "")
+        if [ -n "${has_git_mount}" ]; then
+          log_info "Container (${c_name}): Git metadata bind mounts detected. Auditing protections..."
+          for sub in "hooks" "config" "info"; do
+            sub_rw=$(echo "${c_inspect}" | jq -r --arg s "/.git/${sub}" '.[0].Mounts[]? | select(.Destination | endswith($s)) | .RW' 2>/dev/null || echo "")
+            if [ "${sub_rw}" = "false" ]; then
+              log_pass "Container (${c_name}): .git/${sub} mount is strictly Read-Only (RW: false, FEAT-01 / VULN-01)."
+            elif [ "${sub_rw}" = "true" ]; then
+              log_fail "Container (${c_name}): .git/${sub} mount is WRITABLE (RW: true, host RCE risk!)."
+            else
+              log_fail "Container (${c_name}): .git/${sub} dedicated Read-Only mount not detected in container Mounts (OPEN-04)."
+            fi
+          done
+        fi
+      fi
+
+      gw_ip=$(echo "${ACTIVE_SUBNET}" | sed -E 's/\.[0-9]+\/[0-9]+$/\.1/')
+      audit_egress_isolation "docker exec ${active_cid}" "${gw_ip}"
+    done
   else
     log_info "No active containers running on '${NETWORK_NAME}'. Skipping live container egress probe."
   fi

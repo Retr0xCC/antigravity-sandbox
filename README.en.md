@@ -92,9 +92,9 @@ Before deploying Antigravity Sandbox, ensure your host meets the following prere
 
 ### Security Implementation
 
-- **Dedicated Netfilter chains (`AGY-SANDBOX-FWD` & `AGY-SANDBOX-IN`):** Network filtering is isolated into dedicated custom chains anchored to `DOCKER-USER` and `INPUT`. Forward transit traffic from container bridge `agy0` to all private/special IPv4 ranges (RFC 1918, CGNAT `100.64.0.0/10`, link-local `169.254.0.0/16`, loopback, multicast, testnets) is unconditionally dropped. Host listening ports (SSH, DB, Docker daemon socket) are blocked via `AGY-SANDBOX-IN`, permitting only host DNS resolution (port 53 UDP/TCP) and established connections (`ESTABLISHED,RELATED`).
+- **Dedicated Netfilter chains (`AGY-SANDBOX-FWD` & `AGY-SANDBOX-IN`):** Network filtering is isolated into dedicated custom chains anchored to `DOCKER-USER` and `INPUT`. Forward transit traffic from container bridge `agy0` to all private/special IPv4 ranges (RFC 1918, CGNAT `100.64.0.0/10`, link-local `169.254.0.0/16`, loopback, multicast, RFC 5737 testnets) is unconditionally dropped. Host listening ports (SSH, DB, Docker daemon socket, host DNS on port 53) are 100% blocked via `AGY-SANDBOX-IN`, permitting only previously established connections (`ESTABLISHED,RELATED`). DNS resolution routes directly to external upstream Quad9 resolvers (`9.9.9.9`, `149.112.112.112`).
 - **Fail-Closed readiness marker:** Container startup strictly requires a healthy, isolated network state. `ensure-network.sh` creates the marker `/run/agy-sandbox/network.ready` only after all bridge, Netfilter, and RPDB routing rules are successfully applied and verified. Both the sandbox CLI initializer (`init-sandbox.sh`) and Dev Container `initializeCommand` halt container startup in Fail-Closed mode if this marker or RPDB rules are missing.
-- **Two-tier RPDB kernel policy routing:** Routing rules are strictly bound to the incoming interface (`iif agy0`), guaranteeing protection even when split-tunnel VPNs manipulate host main/default routing tables. Intra-subnet traffic is allowed at priority 95 (`lookup main`), while private/special destination CIDRs are immediately rejected at priority 100 (`unreachable`).
+- **Two-tier RPDB kernel policy routing:** Routing rules are strictly bound to the incoming interface (`iif agy0`), guaranteeing protection even when split-tunnel VPNs manipulate host main/default routing tables. Inter-container communication is disabled (`enable_icc=false`), while private/special destination CIDRs are immediately rejected at priority 100 (`unreachable`).
 - **Pre-baked offline patcher & supply chain pinning:** The Docker image build pins external dependencies with immutable digests (`ghcr.io/astral-sh/uv` by sha256, `QNIX-Dev/eligibility-antigravity-patcher` by commit `90498f50353d414232f593dffe88899bc80b6312`). The patcher is pre-installed at image build time into `/usr/local/share/agy-sandbox/patcher` (owned by `root:root`). At container startup, `setup.sh` runs the patcher purely offline without `git clone` or external network access.
 - **Host credential, socket & IPC neutralization (VULN-04 & NEW-05):**
   - *Host vs container scope:* Options `dev.containers.copyGitConfig`, `dev.containers.dockerCredentialHelper`, `dev.containers.mountWaylandSocket`, and `dev.containers.forwardGpg` are evaluated by the Dev Containers extension on the **host** prior to container creation. `diagnose.sh` audits host IDE user settings (`~/.config/Code/User/settings.json`) to verify that developers keep these flags disabled on the host.
@@ -166,11 +166,11 @@ Options:
   -h, --help                     Show help message
 
 Examples:
-  agy-sandbox /path/to/project node
-  agy-sandbox --worktree /path/to/project python
+  agy-sandbox /path/to/project default
+  agy-sandbox --worktree /path/to/project math-labs
   agy-sandbox --worktree --worktree-branch experiment-1 /path/to/project
   agy-sandbox --review /path/to/project agy-sandbox
-  agy-sandbox --mount /tmp/datasets:/data:ro /path/to/project
+  agy-sandbox --mount /srv/datasets:/data:ro /path/to/project
 ```
 
 #### Recommended Host VS Code / Cursor Settings (Zero-Trust)
@@ -260,7 +260,8 @@ When running multiple sandboxes across different projects (especially with untru
 
 Available template profiles:
 - `default` (default) — Clean base environment: antigravity-cli, uv, git, and a standard set of build tools.
-- `rpi-edge-node` — Profile for edge node and gateway automation with Ansible (2.15+), `ansible-lint`, `yamllint`, `community.general` collection, Go (1.22+), OpenSSH client, and VS Code extensions (`redhat.ansible`, `golang.go`, `redhat.vscode-yaml`, `even-better-toml`, `samuelcolvin.jinjahtml` for Jinja2 `.j2` templates).
+- `affine-mcp` — Profile for AFFiNE Cloud and external instances integration via MCP (Node.js 22 LTS, affine-mcp-server 3.11.0, interactive `affine-setup` wizard).
+- `rpi-edge-node` — Profile for edge node and gateway automation with Ansible (2.18+), `ansible-lint`, `yamllint`, `community.general` collection, Go (1.22+), OpenSSH client, and VS Code extensions (`redhat.ansible`, `golang.go`, `redhat.vscode-yaml`, `even-better-toml`, `samuelcolvin.jinjahtml` for Jinja2 `.j2` templates).
 - `math-labs` — Profile for mathematical computing and data analysis with Python, Jupyter (`ms-toolsai.jupyter`), PDF viewer (`tomoki1207.pdf`), NumPy, SciPy, Matplotlib, SymPy, and pandas.
 
 ---
@@ -337,8 +338,8 @@ agy-sandbox diagnose
 The diagnostic suite validates 8 comprehensive security checkpoints:
 1. **Docker Engine, Bridge Network (`agy_net`) & Readiness Marker:** Verifies daemon responsiveness, dynamic subnet discovery, bridge name mapping, and `/run/agy-sandbox/network.ready` existence.
 2. **Kernel Bridge Interface (`agy0`):** Confirms link existence and state in kernel.
-3. **Linux Kernel Policy Routing (`ip rule`):** Confirms priority 95 intra-subnet allowance (`lookup main`) and priority 100 `unreachable` rules across all 12 private/special IPv4 ranges, strictly scoped to incoming interface `iif agy0`.
-4. **Netfilter Packet Filtering (`iptables` / `ip6tables`):** Audits atomic jumps to custom chains `AGY-SANDBOX-FWD` and `AGY-SANDBOX-IN`, intra-subnet `RETURN`, DROP rules for all 12 private destination ranges, and host input restrictions (only port 53 DNS allowed).
+3. **Linux Kernel Policy Routing (`ip rule`):** Confirms priority 100 `unreachable` rules across all 15 private/special IPv4 ranges (including RFC 5737 testnets), strictly scoped to incoming interface `iif agy0`, and absence of intra-subnet bypasses.
+4. **Netfilter Packet Filtering (`iptables` / `ip6tables`):** Audits atomic jumps to custom chains `AGY-SANDBOX-FWD` and `AGY-SANDBOX-IN`, DROP rules for all 15 destination ranges, and complete host input blockage (including port 53).
 5. **IPv6 Boundary & Systemd Persistence:** Audits IPv6 disable sysctl on `agy0`, ip6tables availability, and verifies that systemd service runs from immutable `/usr/local/lib/agy-sandbox/`.
 6. **Supply Chain Pinning & Image Integrity:** Verifies immutable sha256 digest for `uv`, commit-pinned patcher, unprivileged volume permissions, root-owned scripts in `/usr/local/share/agy-sandbox/`, and Git worktree `safe.directory` logic.
 7. **Dev Container Specification & Runtime Hardening:** Static audit of credential blocking flags, Askpass neutralization, Fail-Closed `initializeCommand`, `runArgs` security options, readonly `.devcontainer` mount, and CLI flags (`--worktree`, `--mount`).
@@ -416,7 +417,7 @@ The Antigravity Sandbox implements defense-in-depth across multiple layers:
 | :--- | :--- | :--- |
 | **Local Network (LAN) & Intranet Scanning** | RPDB interface-bound rules (`iif agy0` priority 100 `unreachable`) & Netfilter `AGY-SANDBOX-FWD` DROP | **100% Blocked** (kernel level) |
 | **Cloud Metadata Theft (`169.254.169.254`)** | Explicit routing and firewall rejection of link-local IP ranges | **100% Blocked** |
-| **Host Services Access (SSH, DB, Ollama, Docker socket)** | Netfilter `AGY-SANDBOX-IN` DROP on `agy0` (only port 53 DNS allowed) | **100% Blocked** |
+| **Host Services Access (SSH, DB, Ollama, Docker socket)** | Netfilter `AGY-SANDBOX-IN` DROP on `agy0` (100% of host ports blocked, including port 53; DNS routes to external Quad9) | **100% Blocked** |
 | **Host Credentials, Sockets (SSH, Git, Wayland, GPG) & IPC Leaks** | Purging and disarming sockets (`chmod 000` for Wayland/GPG/IPC) on `postStartCommand`/`postAttachCommand`, cleaning `.docker/config.json`, sanitizing `~/.gitconfig` while preserving `user.name`/`user.email`, nullifying `remoteEnv`, disabling `remote.autoForwardPorts`, host settings audit in `diagnose.sh` | **Neutralized in Container / Recommended Host Settings** |
 | **Root Privilege Escalation Inside Container** | Complete removal of `sudo` and `/etc/sudoers*` from image, mandatory `--security-opt=no-new-privileges:true`, stripping `privileged: true` and `capAdd` in Full Custom Mode | **100% Prevented** (Rootless) |
 | **Container Breakout & Kernel Attacks** | `--security-opt=no-new-privileges:true`, `--cap-drop=NET_RAW`, unprivileged user (`vscode`), pids/memory/cpus limits | **Hardened** |
@@ -475,9 +476,6 @@ If you need to completely override the build environment, place your own `devcon
 
 ```text
 antigravity-sandbox/
-├── .devcontainer/                  # Dev Container configuration for developing the sandbox itself
-├── .github/workflows/
-│   └── docker-publish.yml          # Multi-arch image build (linux/amd64, linux/arm64)
 ├── base/
 │   ├── devcontainer.json           # Base Dev Container specification
 │   ├── Dockerfile                  # Base Docker image

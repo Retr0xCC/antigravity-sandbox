@@ -163,8 +163,6 @@ if [ -n "${AGY_VERSION:-}" ] && [ "${AGY_VERSION}" != "latest" ]; then
             bash "/usr/local/share/agy-sandbox/install-agy.sh" "${AGY_VERSION}"
         elif [ -f "${SETUP_DIR}/install-agy.sh" ]; then
             bash "${SETUP_DIR}/install-agy.sh" "${AGY_VERSION}"
-        elif [ -f "/tmp/install-agy.sh" ]; then
-            bash "/tmp/install-agy.sh" "${AGY_VERSION}"
         fi
     fi
 fi
@@ -176,8 +174,6 @@ if [ "${AGY_PATCH}" = "true" ] || [ "${AGY_PATCH}" = "1" ] || [ "${AGY_PATCH}" =
     PATCHER_SCRIPT="/usr/local/share/agy-sandbox/patcher/manager.py"
     if [ -f "${PATCHER_SCRIPT}" ]; then
         python3 "${PATCHER_SCRIPT}" patch cli
-    elif [ -d "/home/vscode/agy-manager" ]; then
-        python3 "/home/vscode/agy-manager/manager.py" patch cli
     else
         echo "==> [antigravity-sandbox] Error: Built-in patcher not found at ${PATCHER_SCRIPT}." >&2
         exit 1
@@ -194,10 +190,12 @@ if [ -n "${AGY_VERSION:-}" ] && [ "${AGY_VERSION}" != "latest" ]; then
             chmod 555 "${agy_bin}" 2>/dev/null || true
         fi
     done
-    # Ensure auto-update is disabled for pinned version
-    if ! grep -q "AGY_CLI_DISABLE_AUTO_UPDATE" /home/vscode/.bashrc 2>/dev/null; then
-        echo "export AGY_CLI_DISABLE_AUTO_UPDATE=true" >> /home/vscode/.bashrc
-    fi
+    # Ensure auto-update is disabled for pinned version across interactive and non-interactive sessions (OPEN-03)
+    for prof in "${USER_HOME}/.profile" "${USER_HOME}/.bashrc"; do
+        if [ -f "${prof}" ] && ! grep -q "AGY_CLI_DISABLE_AUTO_UPDATE" "${prof}" 2>/dev/null; then
+            sed -i '1s/^/export AGY_CLI_DISABLE_AUTO_UPDATE=true\n/' "${prof}" 2>/dev/null || echo "export AGY_CLI_DISABLE_AUTO_UPDATE=true" >> "${prof}"
+        fi
+    done
 else
     echo "==> Setting standard executable permissions (chmod 755 for latest version with auto-updates enabled)..."
     for agy_bin in "/home/vscode/.antigravity/bin/agy" "/home/vscode/.local/bin/agy"; do
@@ -205,10 +203,10 @@ else
             chmod 755 "${agy_bin}" 2>/dev/null || true
         fi
     done
-    # Remove auto-update disable export from ~/.bashrc if present
-    if [ -f /home/vscode/.bashrc ]; then
-        sed -i '/AGY_CLI_DISABLE_AUTO_UPDATE/d' /home/vscode/.bashrc 2>/dev/null || true
-    fi
+    # Remove auto-update disable export from shell profiles if present
+    for prof in "${USER_HOME}/.profile" "${USER_HOME}/.bashrc"; do
+        [ -f "${prof}" ] && sed -i '/AGY_CLI_DISABLE_AUTO_UPDATE/d' "${prof}" 2>/dev/null || true
+    done
 fi
 
 # Safe git directory configuration scoped strictly to target workspace (Fix F11 & FEAT-01)

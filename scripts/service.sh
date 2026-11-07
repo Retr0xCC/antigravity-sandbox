@@ -156,6 +156,30 @@ cmd_install() {
   ${SUDO} install -d -o root -g root -m 0755 "${SYSTEM_LIB_DIR}"
   if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
     ${SUDO} install -o root -g root -m 0644 "${SCRIPT_DIR}/sandbox.conf" "${SYSTEM_LIB_DIR}/sandbox.conf"
+    # Preserve caller environment overrides into installed sandbox.conf (Fix BUG-03)
+    local cfg_vars=(
+      "NETWORK_NAME"
+      "BRIDGE_NAME"
+      "SUBNET"
+      "DNS_PRIMARY"
+      "DNS_SECONDARY"
+      "PIDS_LIMIT"
+      "MEMORY_LIMIT"
+      "CPUS_LIMIT"
+      "AGY_VERSION"
+      "AGY_PATCH"
+      "PATCHER_COMMIT"
+    )
+    for var_name in "${cfg_vars[@]}"; do
+      if [ -n "${!var_name:-}" ]; then
+        local val="${!var_name}"
+        if ${SUDO} grep -q "^${var_name}=" "${SYSTEM_LIB_DIR}/sandbox.conf" 2>/dev/null; then
+          ${SUDO} sed -i "s|^${var_name}=.*|${var_name}=\"${val}\"|" "${SYSTEM_LIB_DIR}/sandbox.conf"
+        else
+          echo "${var_name}=\"${val}\"" | ${SUDO} tee -a "${SYSTEM_LIB_DIR}/sandbox.conf" >/dev/null
+        fi
+      fi
+    done
   fi
   ${SUDO} install -o root -g root -m 0755 "${SCRIPT_DIR}/ensure-network.sh" "${SYSTEM_ENSURE_SCRIPT}"
   ${SUDO} install -o root -g root -m 0755 "${SCRIPT_DIR}/teardown-network.sh" "${SYSTEM_TEARDOWN_SCRIPT}"

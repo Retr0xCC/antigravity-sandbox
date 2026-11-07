@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
 
 LABEL org.opencontainers.image.title="antigravity-sandbox" \
       org.opencontainers.image.description="Hardened minimal development container for Antigravity and AI coding agents" \
@@ -44,17 +44,18 @@ RUN mkdir -p /home/vscode/.gemini /home/vscode/.gemini-shared /home/vscode/.cach
     && chmod 0755 /home/vscode/.cache \
     && chmod 0700 /home/vscode/.gemini /home/vscode/.gemini-shared
 
+# Pin specific CLI version and install into /usr/local/bin as root (owned by root:root, mode 0755)
+# In rootless container (sudo purged, no-new-privileges:true), unprivileged agent cannot overwrite /usr/local/bin/agy (OPEN-03)
+ARG AGY_VERSION=1.5.3
+ENV AGY_VERSION=${AGY_VERSION}
+RUN bash /usr/local/share/agy-sandbox/install-agy.sh "${AGY_VERSION}" "/usr/local/bin" \
+    && chown root:root /usr/local/bin/agy \
+    && chmod 0755 /usr/local/bin/agy
+
 # Configure unprivileged vscode user
 USER vscode
 ENV HOME=/home/vscode
-ENV PATH="/home/vscode/.antigravity/bin:/home/vscode/.local/bin:${PATH}"
-
-# Pin specific CLI version
-ARG AGY_VERSION=1.5.3
-ENV AGY_VERSION=${AGY_VERSION}
-
-# Install antigravity-cli for unprivileged user
-RUN bash /usr/local/share/agy-sandbox/install-agy.sh "${AGY_VERSION}"
+ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/home/vscode/.local/bin"
 
 # Configure wrapper function and alias for agy with one-time setup marker
 RUN cat <<'EOF' >> /home/vscode/.bash_aliases
@@ -63,20 +64,6 @@ agy() {
     if [ ! -f /home/vscode/.agy_initialized ]; then
         if [ -x /usr/local/share/agy-sandbox/setup.sh ]; then
             /usr/local/share/agy-sandbox/setup.sh "$PWD"
-        else
-            local cur="$PWD"
-            local setup_script=""
-            while [ "$cur" != "/" ] && [ -n "$cur" ]; do
-                if [ -f "$cur/.devcontainer/setup.sh" ]; then
-                    setup_script="$cur/.devcontainer/setup.sh"
-                    break
-                fi
-                cur="$(dirname "$cur")"
-            done
-
-            if [ -n "$setup_script" ]; then
-                bash "$setup_script" "$PWD"
-            fi
         fi
     fi
 

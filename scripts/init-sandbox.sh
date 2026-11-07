@@ -88,15 +88,9 @@ fi
 DEFAULT_AGY_PATCH="${DEFAULT_AGY_PATCH:-true}"
 
 # 3. Pinning behavior from sandbox.conf:
-# If AGY_PINNED is empty / not set ("без упоминания pinning"),
-# it is automatically enabled with patch ("true") and disabled without it ("false").
-DEFAULT_AGY_PINNED="${AGY_PINNED:-}"
-if [ -z "${DEFAULT_AGY_PINNED}" ]; then
-  case "${DEFAULT_AGY_PATCH}" in
-    true|1|yes) DEFAULT_AGY_PINNED="true" ;;
-    *)          DEFAULT_AGY_PINNED="false" ;;
-  esac
-fi
+# By default, version pinning is enabled for security (PINNED_STABLE_VERSION=1.5.3 with SHA256 verification),
+# even when --no-patch is chosen (clean official binary, OPEN-02).
+DEFAULT_AGY_PINNED="${AGY_PINNED:-true}"
 
 # 4. Resolve default version based on pinning:
 # If pinned, default version is PINNED_STABLE_VERSION (e.g. 1.5.3).
@@ -308,7 +302,7 @@ assemble_devcontainer_json() {
 
   # Initialize fail-closed host check command synchronized with sandbox.conf
   local ready_path="${READY_FILE}"
-  local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
+  local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; rules_cnt=\$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif \${br}\" | grep -c \"unreachable\"); if [ \"\$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for \${br} (\$rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
 
   # Enforce security settings with highest precedence over template
   local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then git config --file /home/vscode/.gitconfig --remove-section credential 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section http 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section gpg 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.askPass 2>/dev/null || true; fi"
@@ -396,7 +390,7 @@ assemble_devcontainer_json() {
     | .remoteEnv.SSH_ASKPASS = "/bin/false"
     | .remoteEnv.WAYLAND_DISPLAY = ""
     | .remoteEnv.VSCODE_IPC_HOOK_CLI = ""
-    | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
+    | (if ($ver != "latest") then .remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE = "true" else del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE) end)
     | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
     | .postStartCommand = (
         if (.postStartCommand | type) == "string" then
@@ -558,43 +552,52 @@ validate_target_dir() {
     return 1
   fi
 
-  # 2. Critical host system directories
-  local sys_dirs=("/etc" "/usr" "/var" "/bin" "/sbin" "/lib" "/lib64" "/proc" "/sys" "/dev" "/run" "/root")
-  for s_dir in "${sys_dirs[@]}"; do
-    if [ "${canonical_target}" = "${s_dir}" ] || [[ "${canonical_target}" == "${s_dir}/"* ]]; then
-      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: '${canonical_target}' is in system directory '${s_dir}' and cannot be used as sandbox target directory!${CLR_RESET}" >&2
-      return 1
-    fi
-  done
-
-  # 3. User root HOME directory itself (Fix VULN-05)
   local canonical_home
   canonical_home="$(realpath -m "${HOME:-/home/$(whoami)}" 2>/dev/null || echo "${HOME}")"
-  if [ -n "${canonical_home}" ] && [ "${canonical_target}" = "${canonical_home}" ]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Cannot initialize sandbox directly in user root HOME directory ('${canonical_home}')!${CLR_RESET}" >&2
-    echo -e "    Mounting the entire home directory exposes host secrets (~/.ssh, ~/.gnupg, ~/.bashrc) to the container." >&2
-    echo -e "    Please specify a dedicated project subdirectory (e.g. 'agy-sandbox ~/projects/my-project')." >&2
-    return 1
+
+  # 2. Check if target is inside user HOME hierarchy
+  # Allows subdirectories under user HOME even on Ostree/Silverblue where $HOME is /var/home/... (BUG-02)
+  if [ -n "${canonical_home}" ] && ([ "${canonical_target}" = "${canonical_home}" ] || [[ "${canonical_target}" == "${canonical_home}/"* ]]); then
+    # User root HOME directory itself (Fix VULN-05)
+    if [ "${canonical_target}" = "${canonical_home}" ]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Cannot initialize sandbox directly in user root HOME directory ('${canonical_home}')!${CLR_RESET}" >&2
+      echo -e "    Mounting the entire home directory exposes host secrets (~/.ssh, ~/.gnupg, ~/.bashrc) to the container." >&2
+      echo -e "    Please specify a dedicated project subdirectory (e.g. 'agy-sandbox ~/projects/my-project')." >&2
+      return 1
+    fi
+
+    # Check if target is a hidden file or directory in user HOME (Fix NEW-03)
+    if [[ "${canonical_target}" == "${canonical_home}/."* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
+      return 1
+    fi
+
+    # Sensitive credential and configuration directories under user HOME
+    local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
+    for s_sub in "${sens_dirs[@]}"; do
+      local s_path="${canonical_home}/${s_sub}"
+      if [ "${canonical_target}" = "${s_path}" ] || [[ "${canonical_target}" == "${s_path}/"* ]]; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: '${canonical_target}' is a sensitive directory ('${s_sub}') and cannot be used as sandbox target directory!${CLR_RESET}" >&2
+        return 1
+      fi
+    done
+
+    # Verified safe user project subdirectory
+    echo "${canonical_target}"
+    return 0
   fi
 
-  # Check if target is /home, /Users, or an ancestor of user HOME (Fix NEW-03)
+  # 3. Check if target is /home, /Users, or an ancestor of user HOME (Fix NEW-03)
   if [ "${canonical_target}" = "/home" ] || [ "${canonical_target}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_target}/"* ]]; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
     return 1
   fi
 
-  # Check if target is a hidden file or directory in user HOME (Fix NEW-03)
-  if [[ "${canonical_target}" == "${canonical_home}/."* ]]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
-    return 1
-  fi
-
-  # 4. Sensitive credential and configuration directories under user HOME
-  local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
-  for s_sub in "${sens_dirs[@]}"; do
-    local s_path="${canonical_home}/${s_sub}"
-    if [ "${canonical_target}" = "${s_path}" ] || [[ "${canonical_target}" == "${s_path}/"* ]]; then
-      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: '${canonical_target}' is a sensitive directory ('${s_sub}') and cannot be used as sandbox target directory!${CLR_RESET}" >&2
+  # 4. Critical host system directories
+  local sys_dirs=("/etc" "/usr" "/var" "/bin" "/sbin" "/lib" "/lib64" "/proc" "/sys" "/dev" "/run" "/root")
+  for s_dir in "${sys_dirs[@]}"; do
+    if [ "${canonical_target}" = "${s_dir}" ] || [[ "${canonical_target}" == "${s_dir}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: '${canonical_target}' is in system directory '${s_dir}' and cannot be used as sandbox target directory!${CLR_RESET}" >&2
       return 1
     fi
   done
@@ -675,49 +678,54 @@ validate_and_parse_mount() {
     return 1
   fi
 
-  # 2. System directories and subdirectories
-  local sys_dirs=("/etc" "/usr" "/var" "/bin" "/sbin" "/lib" "/lib64" "/proc" "/sys" "/dev" "/run" "/root")
-  for s_dir in "${sys_dirs[@]}"; do
-    if [ "${canonical_host}" = "${s_dir}" ] || [[ "${canonical_host}" == "${s_dir}/"* ]]; then
-      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' (resolves to '${canonical_host}') is in system directory '${s_dir}' and is blacklisted for security reasons!${CLR_RESET}" >&2
-      return 1
-    fi
-  done
-
-  # Docker sockets
-  if [ "${canonical_host}" = "/var/run/docker.sock" ] || [ "${canonical_host}" = "/run/docker.sock" ]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a Docker socket and is blacklisted for security reasons!${CLR_RESET}" >&2
-    return 1
-  fi
-
-  # 3. User Home Directory entirely and ancestor directories (Fix NEW-03)
   local canonical_home
-  canonical_home="$(realpath -m "${HOME}" 2>/dev/null || echo "${HOME}")"
-  if [ "${canonical_host}" = "${canonical_home}" ]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is the entire user HOME directory and is blacklisted for security reasons!${CLR_RESET}" >&2
-    return 1
-  fi
+  canonical_home="$(realpath -m "${HOME:-/home/$(whoami)}" 2>/dev/null || echo "${HOME}")"
 
-  if [ "${canonical_host}" = "/home" ] || [ "${canonical_host}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_host}/"* ]]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
-    return 1
-  fi
-
-  # 4. Hidden files or directories under user HOME (Fix NEW-03)
-  if [[ "${canonical_host}" == "${canonical_home}/."* ]]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
-    return 1
-  fi
-
-  # 5. Sensitive directories under user HOME
-  local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
-  for s_sub in "${sens_dirs[@]}"; do
-    local s_path="${canonical_home}/${s_sub}"
-    if [ "${canonical_host}" = "${s_path}" ] || [[ "${canonical_host}" == "${s_path}/"* ]]; then
-      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' contains sensitive directory '${s_sub}' and is blacklisted for security reasons!${CLR_RESET}" >&2
+  # 2. Check if host mount path is inside user HOME hierarchy
+  # Allows subdirectories under user HOME even on Ostree/Silverblue where $HOME is /var/home/... (BUG-02)
+  if [ -n "${canonical_home}" ] && ([ "${canonical_host}" = "${canonical_home}" ] || [[ "${canonical_host}" == "${canonical_home}/"* ]]); then
+    if [ "${canonical_host}" = "${canonical_home}" ]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is the entire user HOME directory and is blacklisted for security reasons!${CLR_RESET}" >&2
       return 1
     fi
-  done
+
+    # Hidden files or directories under user HOME (Fix NEW-03)
+    if [[ "${canonical_host}" == "${canonical_home}/."* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
+      return 1
+    fi
+
+    # Sensitive directories under user HOME
+    local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
+    for s_sub in "${sens_dirs[@]}"; do
+      local s_path="${canonical_home}/${s_sub}"
+      if [ "${canonical_host}" = "${s_path}" ] || [[ "${canonical_host}" == "${s_path}/"* ]]; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' contains sensitive directory '${s_sub}' and is blacklisted for security reasons!${CLR_RESET}" >&2
+        return 1
+      fi
+    done
+  else
+    # 3. Docker sockets
+    if [ "${canonical_host}" = "/var/run/docker.sock" ] || [ "${canonical_host}" = "/run/docker.sock" ]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a Docker socket and is blacklisted for security reasons!${CLR_RESET}" >&2
+      return 1
+    fi
+
+    # 4. Ancestor directories of user HOME (Fix NEW-03)
+    if [ "${canonical_host}" = "/home" ] || [ "${canonical_host}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_host}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
+      return 1
+    fi
+
+    # 5. System directories and subdirectories
+    local sys_dirs=("/etc" "/usr" "/var" "/bin" "/sbin" "/lib" "/lib64" "/proc" "/sys" "/dev" "/run" "/root")
+    for s_dir in "${sys_dirs[@]}"; do
+      if [ "${canonical_host}" = "${s_dir}" ] || [[ "${canonical_host}" == "${s_dir}/"* ]]; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' (resolves to '${canonical_host}') is in system directory '${s_dir}' and is blacklisted for security reasons!${CLR_RESET}" >&2
+        return 1
+      fi
+    done
+  fi
 
   if [ ! -e "${host_path}" ]; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Host mount path '${host_raw}' does not exist.${CLR_RESET}" >&2
@@ -992,7 +1000,7 @@ do_init_sandbox() {
     fi
 
     local ready_path="${READY_FILE}"
-    local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
+    local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; rules_cnt=\$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif \${br}\" | grep -c \"unreachable\"); if [ \"\$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for \${br} (\$rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
     local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then git config --file /home/vscode/.gitconfig --remove-section credential 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section http 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section gpg 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.askPass 2>/dev/null || true; fi"
 
     local tmp_dc
@@ -1001,6 +1009,7 @@ do_init_sandbox() {
     local custom_filter='
       del(.privileged)
       | del(.capAdd)
+      | del(.securityOpt)
       | del(.capDrop)
       | .customizations.vscode.settings = ((.customizations.vscode.settings // {}) * {
           "dev.containers.copyGitConfig": false,
@@ -1031,7 +1040,7 @@ do_init_sandbox() {
           startswith("--memory=") or
           startswith("--cpus=") or
           startswith("--tmpfs=/tmp:") or
-          startswith("--security-opt=no-new-privileges") or
+          startswith("--security-opt=") or
           startswith("--sysctl=net.ipv6.conf") or
           startswith("--privileged") or
           startswith("--cap-add") or
@@ -1088,7 +1097,7 @@ do_init_sandbox() {
       | .remoteEnv.SSH_ASKPASS = "/bin/false"
       | .remoteEnv.WAYLAND_DISPLAY = ""
       | .remoteEnv.VSCODE_IPC_HOOK_CLI = ""
-      | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
+      | (if ($ver != "latest") then .remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE = "true" else del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE) end)
       | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
       | .postStartCommand = (
           if (.postStartCommand | type) == "string" then
@@ -1974,14 +1983,41 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         CLI_SHARED_CACHE="${1#*=}"
         shift
         ;;
+      -t|--template)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing template name for $1${CLR_RESET}" >&2
+          exit 1
+        fi
+        TEMPLATE="$2"
+        shift 2
+        ;;
+      --template=*)
+        TEMPLATE="${1#*=}"
+        shift
+        ;;
+      --target)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing target directory for $1${CLR_RESET}" >&2
+          exit 1
+        fi
+        TARGET_DIR="$2"
+        shift 2
+        ;;
+      --target=*)
+        TARGET_DIR="${1#*=}"
+        shift
+        ;;
       -h|--help|help)
         echo "Usage: agy-sandbox [OPTIONS] [TARGET_DIR] [TEMPLATE]"
+        echo "       agy-sandbox -t <template> --target <dir>"
         echo "       agy-sandbox --review [TARGET_DIR] [BRANCH]"
         echo ""
         echo "Without arguments in interactive terminal, launches the Antigravity TUI."
         echo ""
         echo "Options:"
         echo "  -i, --interactive              Launch interactive terminal user interface"
+        echo "  -t, --template <name>          Specify sandbox template (e.g. 'default', 'math-labs', 'affine-mcp')"
+        echo "  --target <dir>                 Specify target project directory"
         echo "  -w, --worktree, --isolate      Create and run sandbox inside an isolated Git clone"
         echo "  --worktree-branch <name>       Git branch for sandbox clone (default: 'agy-sandbox', implies --worktree)"
         echo "  -r, --review [DIR] [BRANCH]    Safely fetch and review sandbox changes in main repository"
@@ -1990,7 +2026,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  --pin, --pinned                Force version pinning (locks binary chmod 555, disables auto-update)"
         echo "  --no-pin, --unpinned           Disable pinning (uses 'latest' unless -v specified, auto-update enabled)"
         echo "  --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)"
-        echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary"
+        echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary (maintains 1.5.3 pinning)"
         echo "  --patcher-commit <sha>         Pin specific 40-character Git commit SHA for eligibility patcher"
         echo "  --shared-config <mode>         Shared auth/config mount mode (readonly|rw|isolated|none, default: readonly)"
         echo "  --shared-cache                 Share package and binary cache across sandboxes"
@@ -2003,11 +2039,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  -h, --help                     Show this help message"
         echo ""
         echo "Examples:"
-        echo "  agy-sandbox /path/to/project node"
-        echo "  agy-sandbox --worktree /path/to/project python"
+        echo "  agy-sandbox /path/to/project default"
+        echo "  agy-sandbox --worktree /path/to/project math-labs"
         echo "  agy-sandbox --worktree --worktree-branch experiment-1 /path/to/project"
         echo "  agy-sandbox --review /path/to/project agy-sandbox"
-        echo "  agy-sandbox --mount /var/data/shared:/data:ro /path/to/project"
+        echo "  agy-sandbox --mount /srv/datasets:/data:ro /path/to/project"
         exit 0
         ;;
       *)
@@ -2027,12 +2063,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # Resolve CLI version and pinning if not explicitly passed via -v
   if [ "$CLI_VERSION_SET" = false ]; then
     if [ "$CLI_PINNED_SET" = false ]; then
-      # Pinning was not explicitly mentioned ("без упоминания pinning"):
-      # Automatically enabled with patch, and disabled without it.
-      case "${CLI_PATCH}" in
-        true|1|yes) CLI_PINNED="true" ;;
-        *)          CLI_PINNED="false" ;;
-      esac
+      CLI_PINNED="${DEFAULT_AGY_PINNED}"
     fi
     if [ "${CLI_PINNED}" = "true" ] || [ "${CLI_PINNED}" = "1" ] || [ "${CLI_PINNED}" = "yes" ]; then
       CLI_VERSION="${PINNED_STABLE_VERSION}"

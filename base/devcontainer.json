@@ -16,7 +16,7 @@
     "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",
     "source=${localWorkspaceFolder}/.devcontainer,target=${containerWorkspaceFolder}/.devcontainer,type=bind,readonly"
   ],
-  "initializeCommand": "bash -c 'ready=\"/run/agy-sandbox/network.ready\"; if [ ! -s \"$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=$(grep \"^ACTIVE_BRIDGE=\" \"$ready\" 2>/dev/null | cut -d= -f2); [ -z \"$br\" ] && br=\"agy0\"; if ! ip rule show 2>/dev/null | grep -q \"iif ${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for ${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'",
+  "initializeCommand": "bash -c 'ready=\"/run/agy-sandbox/network.ready\"; if [ ! -s \"$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=$(grep \"^ACTIVE_BRIDGE=\" \"$ready\" 2>/dev/null | cut -d= -f2); [ -z \"$br\" ] && br=\"agy0\"; rules_cnt=$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif ${br}\" | grep -c \"unreachable\"); if [ \"$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for ${br} ($rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'",
   "runArgs": [
     "--network=agy_net",
     "--dns=9.9.9.9",
@@ -43,7 +43,8 @@
     "GIT_ASKPASS": "/bin/false",
     "SSH_ASKPASS": "/bin/false",
     "WAYLAND_DISPLAY": "",
-    "VSCODE_IPC_HOOK_CLI": ""
+    "VSCODE_IPC_HOOK_CLI": "",
+    "AGY_CLI_DISABLE_AUTO_UPDATE": "true"
   },
   "postCreateCommand": [
     "/usr/local/share/agy-sandbox/setup.sh",
