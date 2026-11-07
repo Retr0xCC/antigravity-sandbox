@@ -204,6 +204,26 @@ audit_egress_isolation() {
         log_fail "Container: /home/vscode/.cache missing uv or agy-downloads directories."
       fi
     fi
+
+    # Wayland, Docker config, and Git credentials leakage probes (VULN-04)
+    wayland_leak=$(${exec_prefix} sh -c 'ls -d /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null' || echo "")
+    if [ -n "${wayland_leak}" ]; then
+      log_warn "Container: Forwarded Wayland socket detected (${wayland_leak}). Set dev.containers.mountWaylandSocket: false in host User settings (VULN-04)."
+    else
+      log_pass "Container: No leaked Wayland sockets detected (VULN-04)."
+    fi
+
+    if ${exec_prefix} test -f /home/vscode/.docker/config.json 2>/dev/null; then
+      log_fail "Container: Leaked Docker credential file found (/home/vscode/.docker/config.json)! (VULN-04 risk)."
+    else
+      log_pass "Container: /home/vscode/.docker/config.json is absent (no Docker credentials leaked)."
+    fi
+
+    if ${exec_prefix} test -f /home/vscode/.gitconfig 2>/dev/null; then
+      log_fail "Container: Leaked host .gitconfig found (/home/vscode/.gitconfig)!"
+    else
+      log_pass "Container: /home/vscode/.gitconfig is absent."
+    fi
   fi
 
   # 1. Gateway host probe
@@ -671,27 +691,30 @@ echo -e "${CLR_BOLD}[7/8] Dev Container Specification & Runtime Hardening (F1, F
 
 DEV_JSON="${ROOT_DIR}/base/devcontainer.json"
 if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
-  # 1. Credential & secret leak prevention (F1)
+  # 1. Credential & secret leak prevention and port auto-forward blocking (F1, VULN-04)
   if jq -e '.customizations.vscode.settings["dev.containers.copyGitConfig"] == false and
             .customizations.vscode.settings["dev.containers.dockerCredentialHelper"] == false and
             .customizations.vscode.settings["dev.containers.mountWaylandSocket"] == false and
             .customizations.vscode.settings["git.terminalAuthentication"] == false and
-            .customizations.vscode.settings["github.gitAuthentication"] == false' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: All 5 isolation & leak prevention flags active in vscode settings (F1)."
+            .customizations.vscode.settings["github.gitAuthentication"] == false and
+            .customizations.vscode.settings["remote.autoForwardPorts"] == false' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: All 6 isolation, credential blocking, and auto-forward prevention flags active in vscode settings (F1, VULN-04)."
   else
-    log_fail "base/devcontainer.json: Missing one or more credential blocking flags in customizations.vscode.settings."
+    log_fail "base/devcontainer.json: Missing one or more credential or auto-forward blocking flags in customizations.vscode.settings (copyGitConfig, dockerCredentialHelper, mountWaylandSocket, remote.autoForwardPorts)."
   fi
 
-  # 2. remoteEnv channel neutralization and tool cache directories (F1)
+  # 2. remoteEnv channel neutralization and tool cache directories (F1, VULN-04)
   if jq -e '.remoteEnv.SSH_AUTH_SOCK == "" and
             .remoteEnv.VSCODE_GIT_IPC_HANDLE == "" and
             .remoteEnv.VSCODE_GIT_ASKPASS_NODE == "" and
             .remoteEnv.VSCODE_GIT_ASKPASS_MAIN == "" and
             .remoteEnv.GIT_ASKPASS == "/bin/false" and
-            .remoteEnv.SSH_ASKPASS == "/bin/false"' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: Host IPC and Askpass channels neutralized in remoteEnv (F1)."
+            .remoteEnv.SSH_ASKPASS == "/bin/false" and
+            .remoteEnv.WAYLAND_DISPLAY == "" and
+            .remoteEnv.VSCODE_IPC_HOOK_CLI == ""' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Host IPC, Askpass, Wayland, and CLI Hook channels neutralized in remoteEnv (F1, VULN-04)."
   else
-    log_fail "base/devcontainer.json: remoteEnv missing IPC/Askpass neutralization variables (F1 risk!)."
+    log_fail "base/devcontainer.json: remoteEnv missing IPC/Askpass/Wayland/CLI neutralization variables (VULN-04 risk!)."
   fi
 
   if jq -e '.remoteEnv.UV_CACHE_DIR == "/home/vscode/.cache/uv" and
@@ -782,11 +805,17 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_fail "base/devcontainer.json: Missing readonly bind mount for .devcontainer (F17 risk!)."
   fi
 
-  # 6. postStartCommand socket and credentials cleanup
-  if jq -e '.postStartCommand | (contains("vscode-git-*.sock") and contains("vscode-ssh-auth-*.sock") and contains(".gitconfig"))' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: postStartCommand cleans forwarded sockets and copied git credentials on startup."
+  # 6. postStartCommand & postAttachCommand socket and credentials cleanup (VULN-04)
+  if jq -e '.postStartCommand | (contains("vscode-git-*.sock") and contains("vscode-ssh-auth-*.sock") and contains("vscode-wayland-*.sock") and contains(".docker/config.json"))' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: postStartCommand cleans forwarded Git, SSH, Wayland sockets, and Docker config on startup (VULN-04)."
   else
-    log_warn "base/devcontainer.json: postStartCommand socket/credential cleanup routine missing or incomplete."
+    log_fail "base/devcontainer.json: postStartCommand socket/credential cleanup routine incomplete (VULN-04 risk!)."
+  fi
+
+  if jq -e '.postAttachCommand | (contains("vscode-git-*.sock") and contains("vscode-ssh-auth-*.sock") and contains("vscode-wayland-*.sock") and contains(".docker/config.json"))' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: postAttachCommand cleans forwarded sockets upon window reload and reconnection (VULN-04)."
+  else
+    log_fail "base/devcontainer.json: Missing postAttachCommand cleanup routine (window reload race condition, VULN-04 risk!)."
   fi
 
   # 7. init-sandbox.sh worktree, clone isolation, and mount flags support (FEAT-01, FEAT-02, VULN-01)
@@ -833,12 +862,58 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       log_fail "scripts/init-sandbox.sh: Full Custom Mode lacks complete security filter enforcement (VULN-03 risk!)."
     fi
 
+    # VULN-04 verification: postAttachCommand and remote.autoForwardPorts in init-sandbox.sh
+    if grep -q "postAttachCommand" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -q "remote.autoForwardPorts" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Enforces postAttachCommand cleanup and remote.autoForwardPorts: false in all modes (VULN-04)."
+    else
+      log_fail "scripts/init-sandbox.sh: Missing postAttachCommand or remote.autoForwardPorts enforcement (VULN-04 risk!)."
+    fi
+
     # Review command support
     if grep -q -- "--review" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
       log_pass "scripts/init-sandbox.sh: Safe review workflow command (--review) supported."
     else
       log_warn "scripts/init-sandbox.sh: Missing --review helper command."
     fi
+  fi
+
+  # 8. Host IDE User Settings Audit (VULN-04 Scope Check)
+  host_ide_settings_paths=(
+    "${HOME}/.config/Code/User/settings.json"
+    "${HOME}/.config/Code - Insiders/User/settings.json"
+    "${HOME}/.config/Code - OSS/User/settings.json"
+    "${HOME}/.config/Cursor/User/settings.json"
+    "${HOME}/.var/app/com.visualstudio.code/config/Code/User/settings.json"
+    "${HOME}/Library/Application Support/Code/User/settings.json"
+  )
+  if [ -d "/mnt/c/Users" ]; then
+    for wsl_user in /mnt/c/Users/*; do
+      if [ -f "${wsl_user}/AppData/Roaming/Code/User/settings.json" ]; then
+        host_ide_settings_paths+=("${wsl_user}/AppData/Roaming/Code/User/settings.json")
+      fi
+    done
+  fi
+
+  found_host_settings=false
+  for h_set in "${host_ide_settings_paths[@]}"; do
+    if [ -f "${h_set}" ]; then
+      found_host_settings=true
+      h_ok=true
+      for req_flag in "dev.containers.copyGitConfig" "dev.containers.dockerCredentialHelper" "dev.containers.mountWaylandSocket"; do
+        val=$(jq -r ".[\"${req_flag}\"] // empty" "${h_set}" 2>/dev/null || echo "")
+        if [ "${val}" != "false" ]; then
+          h_ok=false
+          log_warn "Host IDE settings (${h_set}): '${req_flag}' is not set to false (value: '${val:-default-true}'). Host may forward sockets/credentials before container starts!"
+        fi
+      done
+      if [ "${h_ok}" = "true" ]; then
+        log_pass "Host IDE settings (${h_set}): All dev.containers.* isolation flags set to false."
+      fi
+    fi
+  done
+  if [ "${found_host_settings}" = "false" ]; then
+    log_info "Host IDE User settings not found at standard paths. If using VS Code/Cursor on host, set dev.containers.copyGitConfig: false, dev.containers.dockerCredentialHelper: false, and dev.containers.mountWaylandSocket: false in host settings."
   fi
 else
   log_info "base/devcontainer.json not found or jq unavailable. Skipping static devcontainer audit."

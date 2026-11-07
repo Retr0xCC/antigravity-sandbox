@@ -41,13 +41,16 @@
     "VSCODE_GIT_ASKPASS_NODE": "",
     "VSCODE_GIT_ASKPASS_MAIN": "",
     "GIT_ASKPASS": "/bin/false",
-    "SSH_ASKPASS": "/bin/false"
+    "SSH_ASKPASS": "/bin/false",
+    "WAYLAND_DISPLAY": "",
+    "VSCODE_IPC_HOOK_CLI": ""
   },
   "postCreateCommand": [
     "/usr/local/share/agy-sandbox/setup.sh",
     "${containerWorkspaceFolder}"
   ],
-  "postStartCommand": "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true",
+  "postStartCommand": "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/user/*/vscode-wayland-*.sock /home/vscode/.gitconfig /home/vscode/.docker/config.json 2>/dev/null || true",
+  "postAttachCommand": "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/user/*/vscode-wayland-*.sock /home/vscode/.gitconfig /home/vscode/.docker/config.json 2>/dev/null || true",
   "customizations": {
     "vscode": {
       "settings": {
@@ -57,7 +60,9 @@
         "dev.containers.mountWaylandSocket": false,
         "git.terminalAuthentication": false,
         "github.gitAuthentication": false,
-        "git.autofetch": false
+        "git.autofetch": false,
+        "remote.autoForwardPorts": false,
+        "remote.restoreForwardedPorts": false
       },
       "extensions": []
     }

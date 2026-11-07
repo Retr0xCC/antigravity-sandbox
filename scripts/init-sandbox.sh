@@ -309,6 +309,8 @@ assemble_devcontainer_json() {
   local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
 
   # Enforce security settings with highest precedence over template
+  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/user/*/vscode-wayland-*.sock /home/vscode/.gitconfig /home/vscode/.docker/config.json 2>/dev/null || true"
+
   # shellcheck disable=SC2016
   local jq_filter='
     del(.capDrop)
@@ -320,7 +322,9 @@ assemble_devcontainer_json() {
         "dev.containers.mountWaylandSocket": false,
         "git.terminalAuthentication": false,
         "github.gitAuthentication": false,
-        "git.autofetch": false
+        "git.autofetch": false,
+        "remote.autoForwardPorts": false,
+        "remote.restoreForwardedPorts": false
       })
     | .runArgs = [
         "--network=" + $net,
@@ -384,13 +388,22 @@ assemble_devcontainer_json() {
     | .remoteEnv.VSCODE_GIT_ASKPASS_MAIN = ""
     | .remoteEnv.GIT_ASKPASS = "/bin/false"
     | .remoteEnv.SSH_ASKPASS = "/bin/false"
+    | .remoteEnv.WAYLAND_DISPLAY = ""
+    | .remoteEnv.VSCODE_IPC_HOOK_CLI = ""
     | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
     | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
     | .postStartCommand = (
         if .postStartCommand then
-          (if (.postStartCommand | contains("vscode-git-*.sock")) then .postStartCommand else (.postStartCommand + "; rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true") end)
+          (if (.postStartCommand | contains("vscode-wayland-*.sock")) then .postStartCommand else (.postStartCommand + "; " + $clean_cmd) end)
         else
-          "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true"
+          $clean_cmd
+        end
+      )
+    | .postAttachCommand = (
+        if .postAttachCommand then
+          (if (.postAttachCommand | contains("vscode-wayland-*.sock")) then .postAttachCommand else (.postAttachCommand + "; " + $clean_cmd) end)
+        else
+          $clean_cmd
         end
       )
   '
@@ -407,6 +420,7 @@ assemble_devcontainer_json() {
      --arg cpus "${CPUS_LIMIT}" \
      --arg tmpfs "${TMPFS_SIZE}" \
      --arg init_cmd "${init_cmd}" \
+     --arg clean_cmd "${clean_forwarding_cmd}" \
      --arg shared_cfg "${shared_config_mount}" \
      --arg cache_vol "${cache_volume}" \
      --arg proj_vol "${project_volume}" \
@@ -842,6 +856,7 @@ do_init_sandbox() {
 
     local ready_path="${READY_FILE}"
     local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; if ! ip rule show 2>/dev/null | grep -q \"iif \${br}\"; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Missing RPDB routing rules for \${br}. Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
+    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/user/*/vscode-wayland-*.sock /home/vscode/.gitconfig /home/vscode/.docker/config.json 2>/dev/null || true"
 
     local tmp_dc
     tmp_dc="$(mktemp)"
@@ -854,7 +869,9 @@ do_init_sandbox() {
           "dev.containers.mountWaylandSocket": false,
           "git.terminalAuthentication": false,
           "github.gitAuthentication": false,
-          "git.autofetch": false
+          "git.autofetch": false,
+          "remote.autoForwardPorts": false,
+          "remote.restoreForwardedPorts": false
         })
       | .runArgs = [
         "--network=" + $net,
@@ -924,13 +941,22 @@ do_init_sandbox() {
       | .remoteEnv.VSCODE_GIT_ASKPASS_MAIN = ""
       | .remoteEnv.GIT_ASKPASS = "/bin/false"
       | .remoteEnv.SSH_ASKPASS = "/bin/false"
+      | .remoteEnv.WAYLAND_DISPLAY = ""
+      | .remoteEnv.VSCODE_IPC_HOOK_CLI = ""
       | del(.remoteEnv.AGY_CLI_DISABLE_AUTO_UPDATE)
       | del(.remoteEnv.ANTIGRAVITY_NO_AUTO_UPDATE)
       | .postStartCommand = (
           if .postStartCommand then
-            (if (.postStartCommand | contains("vscode-git-*.sock")) then .postStartCommand else (.postStartCommand + "; rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true") end)
+            (if (.postStartCommand | contains("vscode-wayland-*.sock")) then .postStartCommand else (.postStartCommand + "; " + $clean_cmd) end)
           else
-            "rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true"
+            $clean_cmd
+          end
+        )
+      | .postAttachCommand = (
+          if .postAttachCommand then
+            (if (.postAttachCommand | contains("vscode-wayland-*.sock")) then .postAttachCommand else (.postAttachCommand + "; " + $clean_cmd) end)
+          else
+            $clean_cmd
           end
         )
     '
@@ -942,6 +968,7 @@ do_init_sandbox() {
        --arg cpus "${CPUS_LIMIT}" \
        --arg tmpfs "${TMPFS_SIZE}" \
        --arg init_cmd "${init_cmd}" \
+       --arg clean_cmd "${clean_forwarding_cmd}" \
        --arg ver "${agy_version}" \
        --arg patch "${agy_patch}" \
        --arg patcher_commit "${patcher_commit}" \

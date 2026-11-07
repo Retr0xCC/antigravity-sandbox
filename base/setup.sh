@@ -165,8 +165,15 @@ if [ -n "${WORKSPACE_DIR}" ] && [ -d "${WORKSPACE_DIR}" ]; then
     fi
 fi
 
-# Clean up forwarded host authentication sockets and copied credentials (Defense-in-Depth for Fix F1)
-rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /home/vscode/.gitconfig 2>/dev/null || true
+# Clean up forwarded host authentication sockets and copied credentials (Fix F1 & VULN-04)
+rm -f /tmp/vscode-git-*.sock \
+      /tmp/vscode-ssh-auth-*.sock \
+      /tmp/vscode-wayland-*.sock \
+      /tmp/user/*/vscode-git-*.sock \
+      /tmp/user/*/vscode-ssh-auth-*.sock \
+      /tmp/user/*/vscode-wayland-*.sock \
+      /home/vscode/.gitconfig \
+      /home/vscode/.docker/config.json 2>/dev/null || true
 
 # Mark initialization as complete
 touch "${MARKER_FILE}"

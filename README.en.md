@@ -96,7 +96,11 @@ Before deploying Antigravity Sandbox, ensure your host meets the following prere
 - **Fail-Closed readiness marker:** Container startup strictly requires a healthy, isolated network state. `ensure-network.sh` creates the marker `/run/agy-sandbox/network.ready` only after all bridge, Netfilter, and RPDB routing rules are successfully applied and verified. Both the sandbox CLI initializer (`init-sandbox.sh`) and Dev Container `initializeCommand` halt container startup in Fail-Closed mode if this marker or RPDB rules are missing.
 - **Two-tier RPDB kernel policy routing:** Routing rules are strictly bound to the incoming interface (`iif agy0`), guaranteeing protection even when split-tunnel VPNs manipulate host main/default routing tables. Intra-subnet traffic is allowed at priority 95 (`lookup main`), while private/special destination CIDRs are immediately rejected at priority 100 (`unreachable`).
 - **Pre-baked offline patcher & supply chain pinning:** The Docker image build pins external dependencies with immutable digests (`ghcr.io/astral-sh/uv` by sha256, `QNIX-Dev/eligibility-antigravity-patcher` by commit `90498f50353d414232f593dffe88899bc80b6312`). The patcher is pre-installed at image build time into `/usr/local/share/agy-sandbox/patcher` (owned by `root:root`). At container startup, `setup.sh` runs the patcher purely offline without `git clone` or external network access.
-- **Host credential & IPC neutralization:** Dev Container settings automatically enforce `dev.containers.copyGitConfig: false`, `dev.containers.dockerCredentialHelper: false`, `git.terminalAuthentication: false`, and `github.gitAuthentication: false`. `remoteEnv` nullifies `SSH_AUTH_SOCK`, `VSCODE_GIT_IPC_HANDLE`, and sets askpass tools to `/bin/false`. Startup scripts continuously purge forwarded host authentication sockets.
+- **Host credential, socket & IPC neutralization (VULN-04):**
+  - *Host vs container scope:* Options `dev.containers.copyGitConfig`, `dev.containers.dockerCredentialHelper`, and `dev.containers.mountWaylandSocket` are evaluated by the Dev Containers extension on the **host** prior to container creation. `diagnose.sh` audits host IDE user settings (`~/.config/Code/User/settings.json`) to verify that developers keep these flags disabled on the host.
+  - *In-container defense-in-depth:* `remoteEnv` nullifies `SSH_AUTH_SOCK`, `VSCODE_GIT_IPC_HANDLE`, `WAYLAND_DISPLAY`, `VSCODE_IPC_HOOK_CLI`, and sets askpass helpers to `/bin/false`.
+  - *Elimination of reconnection race window (`postAttachCommand`):* Both on initial container startup (`postStartCommand`) and on EVERY window attach / reload (`postAttachCommand`), forwarded sockets (`vscode-git-*.sock`, `vscode-ssh-auth-*.sock`, `vscode-wayland-*.sock` across `/tmp` and `/tmp/user/*/`), copied `.gitconfig`, and Docker registry credentials (`~/.docker/config.json`) are purged.
+  - *Port auto-forwarding lockdown:* `"remote.autoForwardPorts": false` and `"remote.restoreForwardedPorts": false` are strictly enforced to prevent background services from binding onto `127.0.0.1` of the host machine.
 - **Hardened systemd daemon:** Network service scripts and configuration are copied to `/usr/local/lib/agy-sandbox/` owned by `root:root` with read-only permissions (`0755`/`0644`), eliminating Local Privilege Escalation (LPE) vulnerabilities. The systemd unit runs with isolation parameters `ProtectHome=yes`, `ProtectSystem=full`, `PrivateTmp=yes`, and manages the `/run/agy-sandbox` runtime directory.
 - **Dynamic Docker IPAM with zero conflicts:** By default, subnets are assigned automatically through standard Docker IPAM from the conflict-free pool (`172.17.0.0/16`-`172.31.0.0/16`), with support for explicit static subnet overrides via `sandbox.conf`.
 - **Isolated dual DNS (`9.9.9.9`, `149.112.112.112`):** Queries resolve directly through Quad9 upstream resolvers bypassing the host resolver, preventing DNS leaks and local host scanning via NetBIOS/mDNS.
@@ -166,6 +170,20 @@ Examples:
   agy-sandbox --review /path/to/project agy-sandbox
   agy-sandbox --mount /tmp/datasets:/data:ro /path/to/project
 ```
+
+#### Recommended Host VS Code / Cursor Settings (Zero-Trust)
+
+Because the Dev Containers extension processes socket forwarding and credential inheritance on the **host** before container creation, it is recommended to add the following directives to your global editor settings on the host (`F1 -> Preferences: Open User Settings (JSON)`):
+
+```json
+{
+  "dev.containers.copyGitConfig": false,
+  "dev.containers.dockerCredentialHelper": false,
+  "dev.containers.mountWaylandSocket": false
+}
+```
+
+The `./scripts/diagnose.sh` script automatically audits host VS Code and Cursor configuration files and reports their status.
 
 #### Full Repository Isolation Mode (Isolated Sandbox Clone, `--worktree` / `--isolate`)
 
@@ -396,7 +414,7 @@ The Antigravity Sandbox implements defense-in-depth across multiple layers:
 | **Local Network (LAN) & Intranet Scanning** | RPDB interface-bound rules (`iif agy0` priority 100 `unreachable`) & Netfilter `AGY-SANDBOX-FWD` DROP | **100% Blocked** (kernel level) |
 | **Cloud Metadata Theft (`169.254.169.254`)** | Explicit routing and firewall rejection of link-local IP ranges | **100% Blocked** |
 | **Host Services Access (SSH, DB, Ollama, Docker socket)** | Netfilter `AGY-SANDBOX-IN` DROP on `agy0` (only port 53 DNS allowed) | **100% Blocked** |
-| **Host Credentials & Secret Sockets Leak** | VS Code setting overrides (`copyGitConfig: false`, `dockerCredentialHelper: false`), `remoteEnv` askpass/IPC nullification, startup socket deletion | **100% Neutralized** |
+| **Host Credentials, Sockets (SSH, Git, Wayland) & IPC Leaks** | Purging sockets and `.docker/config.json` on `postStartCommand` and `postAttachCommand`, nullifying askpass/IPC/Wayland in `remoteEnv`, disabling `remote.autoForwardPorts`, host settings audit in `diagnose.sh` | **100% Neutralized** |
 | **Root Privilege Escalation Inside Container** | Complete removal of `sudo` and `/etc/sudoers*` from image, mandatory `--security-opt=no-new-privileges:true` | **100% Prevented** (Rootless) |
 | **Container Breakout & Kernel Attacks** | `--security-opt=no-new-privileges:true`, `--cap-drop=NET_RAW`, unprivileged user (`vscode`), pids/memory/cpus limits | **Hardened** |
 | **Container Configuration Tampering & Host RCE** | Read-only bind mount for `.devcontainer/` inside container, mandatory security filtering even in Full Custom Mode | **100% Protected** |

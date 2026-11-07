@@ -96,7 +96,11 @@
 - **Защита Fail-Closed (маркер готовности):** Запуск контейнеров строго требует полностью поднятой и изолированной сети хоста. Скрипт `ensure-network.sh` создает маркер `/run/agy-sandbox/network.ready` только после успешного применения и проверки всех правил Netfilter и RPDB. Как CLI-инициализатор (`init-sandbox.sh`), так и директива `initializeCommand` в Dev Container прерывают запуск в режиме Fail-Closed, если маркер или правила маршрутизации отсутствуют.
 - **Двухуровневая маршрутизация политик ядра Linux (RPDB):** Правила маршрутизации строго привязаны к входящему интерфейсу (`iif agy0`), что гарантирует защиту от утечек трафика даже при активных split-tunnel VPN, переопределяющих таблицу main хоста. Трафик внутри подсети разрешается с приоритетом 95 (`lookup main`), а любые обращения к приватным CIDR назначения сбрасываются с приоритетом 100 (`unreachable`).
 - **Предсобранный оффлайн-патчер и Supply Chain Pinning:** При сборке Docker-образа внешние зависимости фиксируются неизменяемыми хэшами (`ghcr.io/astral-sh/uv` по sha256, `QNIX-Dev/eligibility-antigravity-patcher` по коммиту `90498f50353d414232f593dffe88899bc80b6312`). Патчер предварительно устанавливается в защищенный системный каталог `/usr/local/share/agy-sandbox/patcher` (владелец `root:root`). При старте контейнера `setup.sh` применяет патчер полностью автономно без `git clone` и без доступа к сети.
-- **Блокировка проброса учетных данных хоста:** В Dev Container принудительно зафиксированы `dev.containers.copyGitConfig: false`, `dev.containers.dockerCredentialHelper: false`, `git.terminalAuthentication: false`, `github.gitAuthentication: false`. В `remoteEnv` переменные `SSH_AUTH_SOCK`, `VSCODE_GIT_IPC_HANDLE` обнулены, а хелперы askpass перенаправлены на `/bin/false`. При каждом старте контейнера очищаются проброшенные сокеты аутентификации.
+- **Блокировка проброса учетных данных хоста и IPC (VULN-04):**
+  - *Настройки хоста vs контейнера:* Опции `dev.containers.copyGitConfig`, `dev.containers.dockerCredentialHelper` и `dev.containers.mountWaylandSocket` считываются расширением Dev Containers на стороне **хоста** до старта контейнера. В руководстве и скрипте `diagnose.sh` автоматизирован аудит User Settings хоста (`~/.config/Code/User/settings.json`) с проверкой отключения этих флагов на хосте.
+  - *Эшелонированная нейтрализация в контейнере:* В `remoteEnv` занулены переменные `SSH_AUTH_SOCK`, `VSCODE_GIT_IPC_HANDLE`, `WAYLAND_DISPLAY`, `VSCODE_IPC_HOOK_CLI`, а утилиты askpass перенаправлены на `/bin/false`.
+  - *Ликвидация окна гонки при переподключении (`postAttachCommand`):* Как при старте контейнера (`postStartCommand`), так и при каждом переоткрытии окна редактора (`postAttachCommand` при `Reload Window`) выполняется принудительная очистка всех проброшенных сокетов (`vscode-git-*.sock`, `vscode-ssh-auth-*.sock`, `vscode-wayland-*.sock` в `/tmp` и `/tmp/user/*/`), скопированного `.gitconfig` и файла учетных данных Docker `~/.docker/config.json`.
+  - *Запрет автопроброса портов:* В `customizations.vscode.settings` зафиксированы `"remote.autoForwardPorts": false` и `"remote.restoreForwardedPorts": false`, исключающие авто-публикацию портов контейнера на `127.0.0.1` хоста.
 - **Харденинг systemd-сервиса:** Исполняемые скрипты и файл конфигурации копируются в каталог `/usr/local/lib/agy-sandbox/`, принадлежащий `root:root` с правами только для чтения (`0755`/`0644`), что исключает уязвимость локального повышения привилегий (LPE). Сервис запускается с параметрами изоляции `ProtectHome=yes`, `ProtectSystem=full`, `PrivateTmp=yes` и управляет рантайм-директорией `/run/agy-sandbox`.
 - **Динамический Docker IPAM без конфликтов:** По умолчанию подсети выделяются автоматически штатным механизмом Docker IPAM из бесконфликтного пула (`172.17.0.0/16`-`172.31.0.0/16`), с возможностью явного принудительного задания статического CIDR через `sandbox.conf`.
 - **Изолированный dual-DNS (`9.9.9.9`, `149.112.112.112`):** Запросы резолвятся напрямую через пару Quad9-серверов в обход резолвера хоста, что исключает утечки DNS и сканирование локальных хостов через NetBIOS/mDNS.
@@ -166,6 +170,20 @@ agy-sandbox /path/to/project [шаблон] -v 1.5.3
   agy-sandbox --review /path/to/project agy-sandbox
   agy-sandbox --mount /tmp/datasets:/data:ro /path/to/project
 ```
+
+#### Рекомендуемая настройка VS Code / Cursor на хосте (Zero-Trust)
+
+Поскольку расширение Dev Containers считывает параметры проброса сокетов и файлов конфигурации на стороне **хоста** до старта контейнера, рекомендуется добавить следующие директивы в глобальные настройки редактора на хосте (`F1 -> Preferences: Open User Settings (JSON)`):
+
+```json
+{
+  "dev.containers.copyGitConfig": false,
+  "dev.containers.dockerCredentialHelper": false,
+  "dev.containers.mountWaylandSocket": false
+}
+```
+
+Скрипт `diagnose.sh` автоматически сканирует настройки VS Code / Cursor на хосте и сообщает о статусе этих параметров.
 
 #### Режим полной изоляции репозитория (Isolated Sandbox Clone, `--worktree` / `--isolate`)
 
@@ -396,7 +414,7 @@ Antigravity Sandbox реализует многоуровневую глубок
 | **Сканирование локальной сети (LAN) и интранета** | Маршрутизация ядра RPDB (`iif agy0` приоритет 100 `unreachable`) и Netfilter `AGY-SANDBOX-FWD` DROP | **100% Заблокировано** (на уровне ядра) |
 | **Кража метаданных облака (`169.254.169.254`)** | Явный сброс маршрутов и фильтрация link-local диапазонов в firewall | **100% Заблокировано** |
 | **Доступ к службам хоста (SSH, БД, Ollama, сокет Docker)** | Netfilter `AGY-SANDBOX-IN` DROP на интерфейсе `agy0` (разрешен только DNS на порту 53) | **100% Заблокировано** |
-| **Утечка учетных данных хоста и сокетов авторизации** | Переопределение настроек VS Code (`copyGitConfig: false`, `dockerCredentialHelper: false`), обнуление askpass/IPC в `remoteEnv`, удаление сокетов при старте | **100% Нейтрализовано** |
+| **Утечка учетных данных хоста, сокетов (SSH, Git, Wayland) и IPC** | Очистка сокетов и `.docker/config.json` на `postStartCommand` и `postAttachCommand`, обнуление askpass/IPC/Wayland в `remoteEnv`, отключение `remote.autoForwardPorts`, аудит настроек хоста в `diagnose.sh` | **100% Нейтрализовано** |
 | **Повышение привилегий до root внутри контейнера** | Полное удаление `sudo` и `/etc/sudoers*` из образа, принудительный флаг `--security-opt=no-new-privileges:true` | **100% Исключено** (Rootless) |
 | **Побег из контейнера и эксплуатация уязвимостей ядра** | `--security-opt=no-new-privileges:true`, `--cap-drop=NET_RAW`, непривилегированный пользователь `vscode`, лимиты pids/memory/cpus | **Защищено** |
 | **Модификация конфигурации контейнера и Host RCE** | Read-Only bind-маунт каталога `.devcontainer/` внутрь контейнера, принудительный фильтр безопасности даже в Full Custom Mode | **100% Защищено** |
