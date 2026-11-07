@@ -6,60 +6,67 @@ set -e
 # Runs once during container creation/initialization
 # ========================================================
 
-MARKER_FILE="/home/vscode/.agy_initialized"
+USER_HOME="${HOME:-/home/vscode}"
+MARKER_FILE="${USER_HOME}/.agy_initialized"
 WORKSPACE_DIR="${1:-${CONTAINER_WORKSPACE_FOLDER:-$(pwd)}}"
 
 # Verify permissions on persisted volumes without requiring sudo (no-new-privileges safe)
-for vol in "/home/vscode/.gemini" "/home/vscode/.gemini-shared"; do
-    if [ -d "${vol}" ] && [ ! -w "${vol}" ]; then
-        echo "==> [antigravity-sandbox] Warning: ${vol} is not writable. Attempting non-interactive permissions fix..."
-        sudo -n chown -R vscode:vscode "${vol}" 2>/dev/null || true
-    fi
-done
-
-if [ -d "/home/vscode/.cache" ] && [ ! -w "/home/vscode/.cache" ]; then
-    sudo -n chown -R vscode:vscode /home/vscode/.cache 2>/dev/null || true
+if [ -d "${USER_HOME}/.gemini" ] && [ ! -w "${USER_HOME}/.gemini" ]; then
+    echo "==> [antigravity-sandbox] Warning: ${USER_HOME}/.gemini is not writable. Attempting non-interactive permissions fix..."
+    sudo -n chown -R vscode:vscode "${USER_HOME}/.gemini" 2>/dev/null || true
 fi
 
-# Ensure shared cache subdirectories exist
-mkdir -p /home/vscode/.cache/uv /home/vscode/.cache/agy-downloads
+if [ -d "${USER_HOME}/.cache" ] && [ ! -w "${USER_HOME}/.cache" ]; then
+    sudo -n chown -R vscode:vscode "${USER_HOME}/.cache" 2>/dev/null || true
+fi
 
-# Orchestrate shared configuration symlinks between .gemini-shared and .gemini
-mkdir -p /home/vscode/.gemini/antigravity-cli /home/vscode/.gemini/config
-mkdir -p /home/vscode/.gemini-shared/antigravity-cli /home/vscode/.gemini-shared/config
+# Ensure cache subdirectories exist
+mkdir -p "${USER_HOME}/.cache/uv" "${USER_HOME}/.cache/agy-downloads"
 
+# Orchestrate configuration migration from .gemini-shared to .gemini (SEC-04 / Fix VULN-02)
+mkdir -p "${USER_HOME}/.gemini/antigravity-cli" "${USER_HOME}/.gemini/config"
+
+# Notice: config/mcp_config.json is strictly project-isolated and NEVER shared across sandboxes (Fix VULN-02)!
 SHARED_CONFIG_FILES=(
     "antigravity-cli/installation_id"
     "antigravity-cli/settings.json"
     "antigravity-cli/jetski_state.pbtxt"
     "antigravity-cli/last_check.timestamp"
-    "config/mcp_config.json"
-    "config/.migrated"
 )
 
-for rel_path in "${SHARED_CONFIG_FILES[@]}"; do
-    gemini_path="/home/vscode/.gemini/${rel_path}"
-    shared_path="/home/vscode/.gemini-shared/${rel_path}"
+if [ -d "${USER_HOME}/.gemini-shared" ]; then
+    for rel_path in "${SHARED_CONFIG_FILES[@]}"; do
+        gemini_path="${USER_HOME}/.gemini/${rel_path}"
+        shared_path="${USER_HOME}/.gemini-shared/${rel_path}"
 
-    # If the file exists in .gemini as a regular file and NOT in .gemini-shared, migrate it
-    if [ -f "${gemini_path}" ] && [ ! -L "${gemini_path}" ]; then
-        if [ ! -e "${shared_path}" ]; then
-            echo "==> [antigravity-sandbox] Migrating ${rel_path} to shared volume..."
-            mv "${gemini_path}" "${shared_path}"
-        else
+        # Break/convert legacy symlinks from previous vulnerable versions
+        if [ -L "${gemini_path}" ]; then
+            target_link="$(readlink "${gemini_path}" 2>/dev/null || true)"
             rm -f "${gemini_path}"
+            if [ -f "${target_link}" ]; then
+                cp -p "${target_link}" "${gemini_path}" 2>/dev/null || true
+            elif [ -f "${shared_path}" ]; then
+                cp -p "${shared_path}" "${gemini_path}" 2>/dev/null || true
+            fi
+            chmod u+rw "${gemini_path}" 2>/dev/null || true
         fi
-    fi
 
-    # If the target in .gemini is a broken symlink, missing, or not pointing to shared_path
-    if [ -L "${gemini_path}" ]; then
-        if [ "$(readlink "${gemini_path}")" != "${shared_path}" ]; then
-            ln -sf "${shared_path}" "${gemini_path}"
+        # If file exists in .gemini-shared and NOT in project volume, copy it (isolated per-project instance)
+        # Inherits authentication tokens without exposing the shared volume to writes/tampering
+        if [ -f "${shared_path}" ] && [ ! -e "${gemini_path}" ]; then
+            echo "==> [antigravity-sandbox] Initializing ${rel_path} from shared config..."
+            mkdir -p "$(dirname "${gemini_path}")"
+            cp -p "${shared_path}" "${gemini_path}" 2>/dev/null || true
+            chmod u+rw "${gemini_path}" 2>/dev/null || true
         fi
-    elif [ ! -e "${gemini_path}" ]; then
-        ln -sf "${shared_path}" "${gemini_path}"
-    fi
-done
+
+        # If .gemini-shared is mounted read-write and empty, populate it from local config (initial onboarding)
+        if [ -w "${USER_HOME}/.gemini-shared" ] && [ -f "${gemini_path}" ] && [ ! -e "${shared_path}" ]; then
+            mkdir -p "$(dirname "${shared_path}")"
+            cp -p "${gemini_path}" "${shared_path}" 2>/dev/null || true
+        fi
+    done
+fi
 
 # Exit early if already initialized
 if [ -f "${MARKER_FILE}" ]; then

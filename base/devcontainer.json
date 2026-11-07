@@ -3,14 +3,15 @@
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
-      "AGY_VERSION": "1.4.6"
+      "AGY_VERSION": "1.5.3",
+      "PATCHER_COMMIT": "90498f50353d414232f593dffe88899bc80b6312"
     }
   },
   "remoteUser": "vscode",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
   "mounts": [
-    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",
+    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume,readonly",
     "source=agy-shared-cache,target=/home/vscode/.cache,type=volume",
     "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",
     "source=${localWorkspaceFolder}/.devcontainer,target=${containerWorkspaceFolder}/.devcontainer,type=bind,readonly"
@@ -31,7 +32,7 @@
     "--init"
   ],
   "remoteEnv": {
-    "AGY_VERSION": "1.4.6",
+    "AGY_VERSION": "1.5.3",
     "AGY_PATCH": "true",
     "UV_CACHE_DIR": "/home/vscode/.cache/uv",
     "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",

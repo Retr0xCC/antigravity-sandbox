@@ -29,6 +29,11 @@ _ENV_PIDS="${PIDS_LIMIT:-}"
 _ENV_MEM="${MEMORY_LIMIT:-}"
 _ENV_CPUS="${CPUS_LIMIT:-}"
 _ENV_TMPFS="${TMPFS_SIZE:-}"
+_ENV_AGY_VER="${AGY_VERSION:-}"
+_ENV_AGY_PATCH="${AGY_PATCH:-}"
+_ENV_AGY_PINNED="${AGY_PINNED:-}"
+_ENV_PATCHER_REPO="${PATCHER_REPO:-}"
+_ENV_PATCHER_COMMIT="${PATCHER_COMMIT:-}"
 
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
@@ -46,6 +51,11 @@ fi
 [ -n "${_ENV_MEM}" ] && MEMORY_LIMIT="${_ENV_MEM}"
 [ -n "${_ENV_CPUS}" ] && CPUS_LIMIT="${_ENV_CPUS}"
 [ -n "${_ENV_TMPFS}" ] && TMPFS_SIZE="${_ENV_TMPFS}"
+[ -n "${_ENV_AGY_VER}" ] && AGY_VERSION="${_ENV_AGY_VER}"
+[ -n "${_ENV_AGY_PATCH}" ] && AGY_PATCH="${_ENV_AGY_PATCH}"
+[ -n "${_ENV_AGY_PINNED}" ] && AGY_PINNED="${_ENV_AGY_PINNED}"
+[ -n "${_ENV_PATCHER_REPO}" ] && PATCHER_REPO="${_ENV_PATCHER_REPO}"
+[ -n "${_ENV_PATCHER_COMMIT}" ] && PATCHER_COMMIT="${_ENV_PATCHER_COMMIT}"
 
 ACTIVE_BRIDGE="${BRIDGE_NAME}"
 ACTIVE_SUBNET="${SUBNET}"
@@ -581,6 +591,22 @@ if [ -f "${ROOT_DIR}/base/install-agy.sh" ]; then
   else
     log_warn "base/install-agy.sh: Patcher commit SHA pinning not found."
   fi
+
+  if grep -q "verify_archive_checksum" "${ROOT_DIR}/base/install-agy.sh" && grep -q "KNOWN_RELEASE_SHA256" "${ROOT_DIR}/base/install-agy.sh"; then
+    log_pass "base/install-agy.sh: Cryptographic SHA256 integrity verification enforced for downloads and cache (VULN-02)."
+  else
+    log_fail "base/install-agy.sh: Missing SHA256 checksum verification routine for downloaded/cached releases (VULN-02 risk!)."
+  fi
+fi
+
+# Check scripts/sandbox.conf
+if [ -f "${ROOT_DIR}/scripts/sandbox.conf" ]; then
+  if grep -E 'PATCHER_COMMIT="[a-f0-9]{40}"' "${ROOT_DIR}/scripts/sandbox.conf" >/dev/null 2>&1; then
+    sc_patch_commit=$(grep -E 'PATCHER_COMMIT=' "${ROOT_DIR}/scripts/sandbox.conf" | head -n1 | cut -d= -f2- | tr -d '"' || echo "")
+    log_pass "scripts/sandbox.conf: Patcher commit pinned with immutable SHA (${sc_patch_commit:0:12})."
+  elif grep -E 'PATCHER_COMMIT=' "${ROOT_DIR}/scripts/sandbox.conf" >/dev/null 2>&1; then
+    log_fail "scripts/sandbox.conf: PATCHER_COMMIT is not pinned to a 40-character SHA."
+  fi
 fi
 
 # Check base/setup.sh
@@ -611,6 +637,20 @@ if [ -f "${ROOT_DIR}/base/setup.sh" ]; then
     log_pass "base/setup.sh: Git worktree safe.directory registration logic present (FEAT-01)."
   else
     log_fail "base/setup.sh: Missing worktree gitdir resolution in safe.directory setup."
+  fi
+
+  # 5. MCP configuration isolation (VULN-02)
+  if grep -E 'SHARED_CONFIG_FILES=.*mcp_config\.json' "${ROOT_DIR}/base/setup.sh" >/dev/null 2>&1; then
+    log_fail "base/setup.sh: mcp_config.json found in SHARED_CONFIG_FILES (Cross-Sandbox RCE risk via MCP injection, VULN-02!)."
+  else
+    log_pass "base/setup.sh: mcp_config.json is excluded from shared configuration volume (project-isolated, VULN-02)."
+  fi
+
+  # 6. Copy-on-Initialize for shared auth files (VULN-02)
+  if grep -q "cp -p \"\${shared_path}\"" "${ROOT_DIR}/base/setup.sh"; then
+    log_pass "base/setup.sh: Copy-on-Initialize pattern used for shared auth files (safe read-only mount compatibility)."
+  else
+    log_warn "base/setup.sh: Copy-on-Initialize pattern not detected."
   fi
 fi
 echo ""
@@ -650,6 +690,14 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: Tool cache directories declared in remoteEnv (UV_CACHE_DIR, AGY_CACHE_DIR)."
   else
     log_fail "base/devcontainer.json: Missing UV_CACHE_DIR or AGY_CACHE_DIR declaration in remoteEnv."
+  fi
+
+  # 2b. Supply chain build arguments (PATCHER_COMMIT)
+  dev_patcher_commit=$(jq -r '.build.args.PATCHER_COMMIT // empty' "${DEV_JSON}")
+  if [[ "${dev_patcher_commit}" =~ ^[a-f0-9]{40}$ ]]; then
+    log_pass "base/devcontainer.json: build.args.PATCHER_COMMIT pinned with immutable SHA (${dev_patcher_commit:0:12})."
+  elif [ -n "${dev_patcher_commit}" ]; then
+    log_fail "base/devcontainer.json: build.args.PATCHER_COMMIT is not pinned to a 40-character SHA."
   fi
 
   # 3. Fail-Closed initializeCommand (F2)
@@ -697,10 +745,12 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: All runArgs security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
   fi
 
-  # 5. mounts shared config, project isolation & readonly .devcontainer (CNT-02, F14, F17)
+  # 5. mounts shared config, project isolation & readonly .devcontainer (CNT-02, F14, F17, VULN-02)
   mounts_str=$(jq -r '.mounts[]?' "${DEV_JSON}")
-  if echo "${mounts_str}" | grep -E "source=agy-shared-config,target=/home/vscode/\.gemini-shared" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: Shared global configuration volume configured (agy-shared-config)."
+  if echo "${mounts_str}" | grep -E "source=agy-shared-config,target=/home/vscode/\.gemini-shared.*readonly" >/dev/null 2>&1; then
+    log_pass "base/devcontainer.json: Shared global configuration volume mounted read-only (agy-shared-config, readonly, VULN-02)."
+  elif echo "${mounts_str}" | grep -E "source=agy-shared-config,target=/home/vscode/\.gemini-shared" >/dev/null 2>&1; then
+    log_warn "base/devcontainer.json: Shared global configuration volume is mounted read-write (recommended: readonly for VULN-02 mitigation)."
   else
     log_fail "base/devcontainer.json: Missing shared configuration volume in mounts (agy-shared-config)."
   fi
@@ -730,12 +780,33 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_warn "base/devcontainer.json: postStartCommand socket/credential cleanup routine missing or incomplete."
   fi
 
-  # 7. init-sandbox.sh worktree and mount flags support (FEAT-01, FEAT-02)
+  # 7. init-sandbox.sh worktree, clone isolation, and mount flags support (FEAT-01, FEAT-02, VULN-01)
   if [ -f "${ROOT_DIR}/scripts/init-sandbox.sh" ]; then
     if grep -q -- "--worktree" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q -- "--mount" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: CLI supports isolated Git worktree (--worktree) and custom bind mounts (--mount)."
+      log_pass "scripts/init-sandbox.sh: CLI supports isolated Git clone (--worktree, --isolate) and custom bind mounts (--mount)."
     else
       log_fail "scripts/init-sandbox.sh: Missing --worktree or --mount flag support."
+    fi
+
+    # VULN-01 verification: ensure main_git_dir is never mounted directly into the container
+    if grep -E 'extra_mounts\+\=\(.*source=\$\{main_git_dir\}' "${ROOT_DIR}/scripts/init-sandbox.sh" >/dev/null 2>&1; then
+      log_fail "scripts/init-sandbox.sh: Detected direct mount of host main_git_dir (VULN-01 risk!)."
+    else
+      log_pass "scripts/init-sandbox.sh: Host main_git_dir is never mounted directly into container (VULN-01 mitigated)."
+    fi
+
+    # VULN-02 verification: project state volume path hashing
+    if grep -q "path_hash" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q "agy-gemini-data-" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Project state volume incorporates unique path hash to prevent volume collisions (VULN-02)."
+    else
+      log_fail "scripts/init-sandbox.sh: Path hashing for project volume isolation not found."
+    fi
+
+    # Review command support
+    if grep -q -- "--review" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Safe review workflow command (--review) supported."
+    else
+      log_warn "scripts/init-sandbox.sh: Missing --review helper command."
     fi
   fi
 else
@@ -878,14 +949,14 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         log_fail "Container: /home/vscode/.cache is NOT mounted."
       fi
 
-      # Stage 4 Git Worktree mounts protection (FEAT-01)
+      # Stage 4 Git repository metadata mounts protection (FEAT-01, VULN-01)
       has_git_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | test("/\\.git(/.*)?$")) | .Destination' 2>/dev/null | head -n1 || echo "")
       if [ -n "${has_git_mount}" ]; then
-        log_info "Container: Git worktree bind mounts detected. Auditing Git metadata protections..."
+        log_info "Container: Git metadata bind mounts detected. Auditing protections..."
         for sub in "hooks" "config" "info"; do
           sub_rw=$(echo "${c_inspect}" | jq -r --arg s "/.git/${sub}" '.[0].Mounts[]? | select(.Destination | endswith($s)) | .RW' 2>/dev/null || echo "")
           if [ "${sub_rw}" = "false" ]; then
-            log_pass "Container: .git/${sub} mount is strictly Read-Only (RW: false, FEAT-01)."
+            log_pass "Container: .git/${sub} mount is strictly Read-Only (RW: false, FEAT-01 / VULN-01)."
           elif [ "${sub_rw}" = "true" ]; then
             log_fail "Container: .git/${sub} mount is WRITABLE (RW: true, host RCE risk!)."
           else

@@ -3,17 +3,19 @@
 # Scoped strictly to the current workspace (Principle of Least Privilege)
 # ========================================================
 
-# 1. Clean up any legacy shared credentials from global volume if present
-if [ -d "/home/vscode/.gemini-shared/affine-mcp" ]; then
-    mkdir -p /home/vscode/.gemini/affine-mcp
-    cp -rn /home/vscode/.gemini-shared/affine-mcp/* /home/vscode/.gemini/affine-mcp/ 2>/dev/null || true
-    rm -rf /home/vscode/.gemini-shared/affine-mcp
-fi
+# 1. Clean up any legacy shared credentials from global volume if present and writable
+if [ -w "/home/vscode/.gemini-shared" ]; then
+    if [ -d "/home/vscode/.gemini-shared/affine-mcp" ]; then
+        mkdir -p /home/vscode/.gemini/affine-mcp
+        cp -rn /home/vscode/.gemini-shared/affine-mcp/* /home/vscode/.gemini/affine-mcp/ 2>/dev/null || true
+        rm -rf /home/vscode/.gemini-shared/affine-mcp
+    fi
 
-if [ -f "/home/vscode/.gemini-shared/config/mcp_config.json" ] && command -v jq >/dev/null 2>&1; then
-    if jq -e '.mcpServers.affine' "/home/vscode/.gemini-shared/config/mcp_config.json" >/dev/null 2>&1; then
-        tmp_shared="$(mktemp)"
-        jq 'del(.mcpServers.affine)' "/home/vscode/.gemini-shared/config/mcp_config.json" > "${tmp_shared}" && mv "${tmp_shared}" "/home/vscode/.gemini-shared/config/mcp_config.json"
+    if [ -f "/home/vscode/.gemini-shared/config/mcp_config.json" ] && command -v jq >/dev/null 2>&1; then
+        if jq -e '.mcpServers.affine' "/home/vscode/.gemini-shared/config/mcp_config.json" >/dev/null 2>&1; then
+            tmp_shared="$(mktemp)"
+            jq 'del(.mcpServers.affine)' "/home/vscode/.gemini-shared/config/mcp_config.json" > "${tmp_shared}" && mv "${tmp_shared}" "/home/vscode/.gemini-shared/config/mcp_config.json"
+        fi
     fi
 fi
 

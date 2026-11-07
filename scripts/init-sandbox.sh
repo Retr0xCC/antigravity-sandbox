@@ -29,7 +29,12 @@ _ENV_PIDS="${PIDS_LIMIT:-}"
 _ENV_MEM="${MEMORY_LIMIT:-}"
 _ENV_CPUS="${CPUS_LIMIT:-}"
 _ENV_TMPFS="${TMPFS_SIZE:-}"
+_ENV_PATCHER_REPO="${PATCHER_REPO:-}"
+_ENV_PATCHER_COMMIT="${PATCHER_COMMIT:-}"
+_ENV_SHARED_CONFIG="${SHARED_CONFIG:-}"
+_ENV_SHARED_CACHE="${SHARED_CACHE:-}"
 
+# Sourcing sandbox.conf as Single Source of Truth (SSOT)
 if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/sandbox.conf"
@@ -46,17 +51,57 @@ fi
 [ -n "${_ENV_MEM}" ] && MEMORY_LIMIT="${_ENV_MEM}"
 [ -n "${_ENV_CPUS}" ] && CPUS_LIMIT="${_ENV_CPUS}"
 [ -n "${_ENV_TMPFS}" ] && TMPFS_SIZE="${_ENV_TMPFS}"
+[ -n "${_ENV_PATCHER_REPO}" ] && PATCHER_REPO="${_ENV_PATCHER_REPO}"
+[ -n "${_ENV_PATCHER_COMMIT}" ] && PATCHER_COMMIT="${_ENV_PATCHER_COMMIT}"
+[ -n "${_ENV_SHARED_CONFIG}" ] && SHARED_CONFIG="${_ENV_SHARED_CONFIG}"
+[ -n "${_ENV_SHARED_CACHE}" ] && SHARED_CACHE="${_ENV_SHARED_CACHE}"
+
+DEFAULT_SHARED_CONFIG="${SHARED_CONFIG:-readonly}"
+DEFAULT_SHARED_CACHE="${SHARED_CACHE:-false}"
 
 CLI_MOUNTS=()
 
-# Antigravity CLI Defaults derived directly from base/devcontainer.json
+# Antigravity CLI Defaults (Single Source of Truth: scripts/sandbox.conf with base/devcontainer.json fallback)
 BASE_DEVCONTAINER="${ROOT_DIR}/base/devcontainer.json"
-DEFAULT_AGY_VERSION=""
-DEFAULT_AGY_PATCH=""
-if [ -f "${BASE_DEVCONTAINER}" ] && command -v jq >/dev/null 2>&1; then
-  DEFAULT_AGY_VERSION="$(jq -r '.remoteEnv.AGY_VERSION // empty' "${BASE_DEVCONTAINER}" 2>/dev/null || true)"
+
+# 1. Target release version from sandbox.conf, fallback to base/devcontainer.json
+CONFIG_AGY_VERSION="${AGY_VERSION:-}"
+if [ -z "${CONFIG_AGY_VERSION}" ] && [ -f "${BASE_DEVCONTAINER}" ] && command -v jq >/dev/null 2>&1; then
+  CONFIG_AGY_VERSION="$(jq -r '.remoteEnv.AGY_VERSION // empty' "${BASE_DEVCONTAINER}" 2>/dev/null || true)"
+fi
+CONFIG_AGY_VERSION="${CONFIG_AGY_VERSION:-1.5.3}"
+PINNED_STABLE_VERSION="${CONFIG_AGY_VERSION}"
+
+# 2. Patch toggle from sandbox.conf, fallback to base/devcontainer.json
+DEFAULT_AGY_PATCH="${AGY_PATCH:-}"
+if [ -z "${DEFAULT_AGY_PATCH}" ] && [ -f "${BASE_DEVCONTAINER}" ] && command -v jq >/dev/null 2>&1; then
   DEFAULT_AGY_PATCH="$(jq -r '.remoteEnv.AGY_PATCH // empty' "${BASE_DEVCONTAINER}" 2>/dev/null || true)"
 fi
+DEFAULT_AGY_PATCH="${DEFAULT_AGY_PATCH:-true}"
+
+# 3. Pinning behavior from sandbox.conf:
+# If AGY_PINNED is empty / not set ("без упоминания pinning"),
+# it is automatically enabled with patch ("true") and disabled without it ("false").
+DEFAULT_AGY_PINNED="${AGY_PINNED:-}"
+if [ -z "${DEFAULT_AGY_PINNED}" ]; then
+  case "${DEFAULT_AGY_PATCH}" in
+    true|1|yes) DEFAULT_AGY_PINNED="true" ;;
+    *)          DEFAULT_AGY_PINNED="false" ;;
+  esac
+fi
+
+# 4. Resolve default version based on pinning:
+# If pinned, default version is PINNED_STABLE_VERSION (e.g. 1.5.3).
+# If unpinned, default version is "latest".
+if [ "${DEFAULT_AGY_PINNED}" = "true" ] || [ "${DEFAULT_AGY_PINNED}" = "1" ] || [ "${DEFAULT_AGY_PINNED}" = "yes" ]; then
+  DEFAULT_AGY_VERSION="${PINNED_STABLE_VERSION}"
+else
+  DEFAULT_AGY_VERSION="latest"
+fi
+
+# 5. Patcher Repository and Commit SHA from sandbox.conf, fallback to base/Dockerfile
+DEFAULT_PATCHER_REPO="${PATCHER_REPO:-https://github.com/QNIX-Dev/eligibility-antigravity-patcher.git}"
+DEFAULT_PATCHER_COMMIT="${PATCHER_COMMIT:-90498f50353d414232f593dffe88899bc80b6312}"
 
 validate_version_format() {
   local ver="$1"
@@ -147,6 +192,8 @@ assemble_dockerfile() {
   local template_name="$2"
   local template_dir="$3"
   local output_file="$4"
+  local patcher_commit="${5:-${DEFAULT_PATCHER_COMMIT}}"
+  local patcher_repo="${6:-${DEFAULT_PATCHER_REPO}}"
 
   local pkgs=()
   if [ -f "${template_dir}/packages.txt" ]; then
@@ -160,6 +207,15 @@ assemble_dockerfile() {
 
   rm -f "${output_file}"
   while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^ARG\ PATCHER_COMMIT= ]] && [ -n "${patcher_commit}" ]; then
+      echo "ARG PATCHER_COMMIT=\"${patcher_commit}\"" >> "${output_file}"
+      continue
+    fi
+    if [[ "$line" =~ ^ARG\ PATCHER_REPO= ]] && [ -n "${patcher_repo}" ]; then
+      echo "ARG PATCHER_REPO=\"${patcher_repo}\"" >> "${output_file}"
+      continue
+    fi
+
     if [[ "$line" =~ ^#\ Configure\ unprivileged\ vscode\ user ]] && [ ${#pkgs[@]} -gt 0 ]; then
       echo "# Install additional packages for ${template_name}" >> "${output_file}"
       echo "RUN apt-get update && apt-get install -y --no-install-recommends \\" >> "${output_file}"
@@ -187,10 +243,34 @@ assemble_devcontainer_json() {
   local agy_version="${5:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
   local agy_patch="${6:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
   local extra_mounts_json="${7:-[]}"
+  local patcher_commit="${8:-${CLI_PATCHER_COMMIT:-${DEFAULT_PATCHER_COMMIT}}}"
+  local target_dir="${9:-}"
+  local shared_config="${10:-${DEFAULT_SHARED_CONFIG}}"
+  local shared_cache="${11:-${DEFAULT_SHARED_CACHE}}"
 
   local display_name="${template_name}"
   if [ "${template_name}" = "default" ]; then
     display_name="Agy"
+  fi
+
+  local path_hash="default"
+  local folder_basename="project"
+  if [ -n "${target_dir}" ]; then
+    path_hash=$(echo -n "${target_dir}" | sha256sum | cut -c1-8)
+    folder_basename="$(basename "${target_dir}")"
+  fi
+  local project_volume="agy-gemini-data-${folder_basename}-${path_hash}"
+
+  local cache_volume="agy-cache-${folder_basename}-${path_hash}"
+  if [ "${shared_cache}" = "true" ] || [ "${shared_cache}" = "1" ] || [ "${shared_cache}" = "yes" ]; then
+    cache_volume="agy-shared-cache"
+  fi
+
+  local shared_config_mount=""
+  if [ "${shared_config}" = "readonly" ] || [ "${shared_config}" = "ro" ]; then
+    shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume,readonly"
+  elif [ "${shared_config}" = "rw" ] || [ "${shared_config}" = "true" ]; then
+    shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"
   fi
 
   local exts=()
@@ -259,27 +339,23 @@ assemble_devcontainer_json() {
           end
         )
       | .mounts = (
-          ((.mounts // []) as $m |
-           (if ($m | any(startswith("source=agy-shared-config,target=/home/vscode/.gemini-shared"))) then
-              $m
-            else
-              ["source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"] + $m
-            end) as $m1 |
-           (if ($m1 | any(startswith("source=agy-shared-cache,target=/home/vscode/.cache"))) then
-              $m1
-            else
-              $m1 + ["source=agy-shared-cache,target=/home/vscode/.cache,type=volume"]
-            end) as $m2 |
-           (if ($m2 | any(startswith("source=agy-gemini-data-"))) then
-              $m2
-            else
-              $m2 + ["source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume"]
-            end) as $m3 |
-           $m3 + ($extra_mounts | map(. as $x | select(($m3 | index($x)) == null)))
-          )
+          ((.mounts // []) | map(select(
+            (startswith("source=agy-shared-config") or
+             startswith("source=agy-shared-cache") or
+             startswith("source=agy-cache-") or
+             startswith("source=agy-gemini-data-")) | not
+          ))) as $filtered |
+          (if ($shared_cfg != "") then [$shared_cfg] else [] end) +
+          $filtered +
+          [
+            ("source=" + $cache_vol + ",target=/home/vscode/.cache,type=volume"),
+            ("source=" + $proj_vol + ",target=/home/vscode/.gemini,type=volume")
+          ] as $base_m |
+          $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
         )
       | .initializeCommand = $init_cmd
       | .build.args.AGY_VERSION = $ver
+      | .build.args.PATCHER_COMMIT = $patcher_commit
       | .remoteEnv.AGY_VERSION = $ver
       | .remoteEnv.AGY_PATCH = $patch
       | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
@@ -291,6 +367,7 @@ assemble_devcontainer_json() {
     jq --arg name "\${localWorkspaceFolderBasename} (${display_name} Sandbox)" \
        --arg ver "${agy_version}" \
        --arg patch "${agy_patch}" \
+       --arg patcher_commit "${patcher_commit}" \
        --arg net "${NETWORK_NAME}" \
        --arg dns1 "${DNS_PRIMARY}" \
        --arg dns2 "${DNS_SECONDARY}" \
@@ -299,6 +376,9 @@ assemble_devcontainer_json() {
        --arg cpus "${CPUS_LIMIT}" \
        --arg tmpfs "${TMPFS_SIZE}" \
        --arg init_cmd "${init_cmd}" \
+       --arg shared_cfg "${shared_config_mount}" \
+       --arg cache_vol "${cache_volume}" \
+       --arg proj_vol "${project_volume}" \
        --argjson exts "${exts_json}" \
        --argjson base_settings "${base_settings}" \
        --argjson tmpl_settings "${tmpl_settings}" \
@@ -309,8 +389,9 @@ assemble_devcontainer_json() {
     local template_content
     template_content=$(cat "${base_json}")
     template_content="${template_content//@@TEMPLATE_NAME@@/${display_name}}"
-    template_content="${template_content//\"AGY_VERSION\": \"1.4.6\"/\"AGY_VERSION\": \"${agy_version}\"}"
+    template_content="${template_content//\"AGY_VERSION\": \"1.5.3\"/\"AGY_VERSION\": \"${agy_version}\"}"
     template_content="${template_content//\"AGY_PATCH\": \"true\"/\"AGY_PATCH\": \"${agy_patch}\"}"
+    template_content="${template_content//\"PATCHER_COMMIT\": \"90498f50353d414232f593dffe88899bc80b6312\"/\"PATCHER_COMMIT\": \"${patcher_commit}\"}"
     template_content="${template_content//\"--network=agy_net\"/\"--network=${NETWORK_NAME}\"}"
     template_content="${template_content//\"--dns=9.9.9.9\"/\"--dns=${DNS_PRIMARY}\"}"
     template_content="${template_content//\"--dns=149.112.112.112\"/\"--dns=${DNS_SECONDARY}\"}"
@@ -318,14 +399,22 @@ assemble_devcontainer_json() {
     template_content="${template_content//\"--memory=8g\"/\"--memory=${MEMORY_LIMIT}\"}"
     template_content="${template_content//\"--cpus=4\"/\"--cpus=${CPUS_LIMIT}\"}"
     template_content="${template_content//\"size=2g\"/\"size=${TMPFS_SIZE}\"}"
-    if ! echo "${template_content}" | grep -q "source=agy-shared-config"; then
-      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",|')
+    if [ -n "${shared_config_mount}" ]; then
+      if echo "${template_content}" | grep -q "source=agy-shared-config"; then
+        template_content=$(echo "${template_content}" | sed 's|source=agy-shared-config[^",]*|'"${shared_config_mount}"'|')
+      else
+        template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "'"${shared_config_mount}"'",|')
+      fi
     fi
-    if ! echo "${template_content}" | grep -q "source=agy-shared-cache"; then
-      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-cache,target=/home/vscode/.cache,type=volume",|')
+    if echo "${template_content}" | grep -q "target=/home/vscode/.cache"; then
+      template_content=$(echo "${template_content}" | sed -E 's|source=[^",]+,target=/home/vscode/\.cache|source='"${cache_volume}"',target=/home/vscode/.cache|')
+    else
+      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source='"${cache_volume}"',target=/home/vscode/.cache,type=volume",|')
     fi
-    if ! echo "${template_content}" | grep -q "source=agy-gemini-data-"; then
-      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",|')
+    if echo "${template_content}" | grep -q "source=agy-gemini-data-"; then
+      template_content=$(echo "${template_content}" | sed -E 's|source=agy-gemini-data-[^",]+|source='"${project_volume}"'|')
+    else
+      template_content=$(echo "${template_content}" | sed 's|"mounts": \[|"mounts": \[\n    "source='"${project_volume}"',target=/home/vscode/.gemini,type=volume",|')
     fi
     if ! echo "${template_content}" | grep -q "UV_CACHE_DIR"; then
       template_content=$(echo "${template_content}" | sed 's|"remoteEnv": {|"remoteEnv": {\n    "UV_CACHE_DIR": "/home/vscode/.cache/uv",\n    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",|')
@@ -341,6 +430,11 @@ assemble_declarative_template() {
   local agy_version="${4:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
   local agy_patch="${5:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
   local extra_mounts_json="${6:-[]}"
+  local patcher_commit="${7:-${CLI_PATCHER_COMMIT:-${DEFAULT_PATCHER_COMMIT}}}"
+  local patcher_repo="${8:-${DEFAULT_PATCHER_REPO}}"
+  local target_dir="${9:-}"
+  local shared_config="${10:-${DEFAULT_SHARED_CONFIG}}"
+  local shared_cache="${11:-${DEFAULT_SHARED_CACHE}}"
 
   # 1. Setup hook
   cp "${ROOT_DIR}/base/setup.sh" "${dest_dir}/setup.sh"
@@ -350,13 +444,16 @@ assemble_declarative_template() {
   fi
 
   # 2. Dockerfile
-  assemble_dockerfile "${ROOT_DIR}/base/Dockerfile" "${template_name}" "${template_path}" "${dest_dir}/Dockerfile"
+  assemble_dockerfile "${ROOT_DIR}/base/Dockerfile" "${template_name}" "${template_path}" "${dest_dir}/Dockerfile" "${patcher_commit}" "${patcher_repo}"
 
   # 3. devcontainer.json
-  assemble_devcontainer_json "${ROOT_DIR}/base/devcontainer.json" "${template_name}" "${template_path}" "${dest_dir}/devcontainer.json" "${agy_version}" "${agy_patch}" "${extra_mounts_json}"
+  assemble_devcontainer_json "${ROOT_DIR}/base/devcontainer.json" "${template_name}" "${template_path}" "${dest_dir}/devcontainer.json" "${agy_version}" "${agy_patch}" "${extra_mounts_json}" "${patcher_commit}" "${target_dir}" "${shared_config}" "${shared_cache}"
 
   # 4. CLI installer
   cp "${ROOT_DIR}/base/install-agy.sh" "${dest_dir}/install-agy.sh"
+  if [ -n "${patcher_commit}" ]; then
+    sed -i 's|PATCHER_COMMIT=.*[a-f0-9]\{40\}.*|PATCHER_COMMIT="${PATCHER_COMMIT:-'"${patcher_commit}"'}"|' "${dest_dir}/install-agy.sh" 2>/dev/null || true
+  fi
   chmod +x "${dest_dir}/install-agy.sh"
 
   # 5. Copy auxiliary template files (scripts, configs, readme)
@@ -525,6 +622,59 @@ validate_and_parse_mount() {
   return 0
 }
 
+do_review_sandbox() {
+  local target_dir="${1:-.}"
+  local branch="${2:-agy-sandbox}"
+
+  target_dir="$(expand_path "${target_dir}")"
+
+  if [ ! -d "${target_dir}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Directory '${target_dir}' does not exist.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  local main_repo_dir
+  if git -C "${target_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    main_repo_dir="$(git -C "${target_dir}" rev-parse --show-toplevel)"
+  else
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: '${target_dir}' is not a git repository.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  local sandbox_dir="${main_repo_dir}-sandbox"
+  if [ ! -d "${sandbox_dir}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Sandbox clone not found at '${sandbox_dir}'.${CLR_RESET}" >&2
+    echo "    Run 'agy-sandbox --worktree ${main_repo_dir}' first to initialize an isolated sandbox." >&2
+    return 1
+  fi
+
+  echo -e "${CLR_BOLD}==> [antigravity-sandbox] Reviewing changes from '${sandbox_dir}' (branch: '${branch}')...${CLR_RESET}"
+
+  # Fetch changes from sandbox into main repository FETCH_HEAD
+  echo "==> Fetching commits from sandbox via safe Git transport protocol..."
+  if ! git -C "${main_repo_dir}" fetch "${sandbox_dir}" "${branch}"; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to fetch branch '${branch}' from '${sandbox_dir}'.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  echo ""
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  echo -e "${CLR_BOLD} Git Diff Summary (HEAD .. FETCH_HEAD):${CLR_RESET}"
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  git -C "${main_repo_dir}" diff --stat HEAD..FETCH_HEAD || true
+  echo ""
+
+  echo -e "${CLR_BOLD}Detailed Diff Preview:${CLR_RESET}"
+  git -C "${main_repo_dir}" diff --color=always HEAD..FETCH_HEAD | head -n 120 || true
+
+  echo ""
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+  echo -e "${CLR_GREEN}✓ Review completed safely without host execution risks.${CLR_RESET}"
+  echo "To merge these reviewed changes into your current branch on the host, run:"
+  echo -e "  ${CLR_BOLD}cd ${main_repo_dir} && git merge FETCH_HEAD${CLR_RESET}"
+  echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
+}
+
 do_init_sandbox() {
   local target_dir="${1:-.}"
   local template="${2:-default}"
@@ -533,6 +683,10 @@ do_init_sandbox() {
   local agy_patch="${5:-${AGY_PATCH:-${DEFAULT_AGY_PATCH}}}"
   local use_worktree="${6:-${CLI_WORKTREE:-false}}"
   local worktree_branch="${7:-${CLI_WORKTREE_BRANCH:-agy-sandbox}}"
+  local patcher_commit="${8:-${CLI_PATCHER_COMMIT:-${DEFAULT_PATCHER_COMMIT}}}"
+  local patcher_repo="${9:-${DEFAULT_PATCHER_REPO}}"
+  local shared_config="${10:-${CLI_SHARED_CONFIG:-${DEFAULT_SHARED_CONFIG}}}"
+  local shared_cache="${11:-${CLI_SHARED_CACHE:-${DEFAULT_SHARED_CACHE}}}"
 
   # Expand tilde and relative paths to canonical absolute path
   target_dir="$(expand_path "${target_dir}")"
@@ -551,7 +705,7 @@ do_init_sandbox() {
     done
   fi
 
-  # 2. Process Git worktree isolation if requested (FEAT-01)
+  # 2. Process Git repository isolation if requested (FEAT-01 / VULN-01 Fix)
   local is_worktree=false
   local worktree_dir=""
   if [ "${use_worktree}" = "true" ]; then
@@ -561,58 +715,70 @@ do_init_sandbox() {
     fi
 
     if ! git -C "${target_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Target directory '${target_dir}' is not a git repository. Cannot create git worktree.${CLR_RESET}" >&2
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Target directory '${target_dir}' is not a git repository. Cannot create isolated sandbox clone.${CLR_RESET}" >&2
       return 1
     fi
 
     local main_repo_dir
     main_repo_dir="$(git -C "${target_dir}" rev-parse --show-toplevel)"
-    local main_git_dir
-    main_git_dir="$(git -C "${target_dir}" rev-parse --git-common-dir)"
-    if [[ "${main_git_dir}" != /* ]]; then
-      main_git_dir="$(cd "${main_repo_dir}/${main_git_dir}" && pwd)"
-    else
-      main_git_dir="$(cd "${main_git_dir}" && pwd)"
-    fi
-
     worktree_dir="${main_repo_dir}-sandbox"
+
     if [ -d "${worktree_dir}" ]; then
+      # Check if this is an old vulnerable git worktree (where .git is a file)
       if [ -f "${worktree_dir}/.git" ]; then
-        echo "==> [antigravity-sandbox] Existing git worktree found at '${worktree_dir}'. Reusing worktree..."
+        echo -e "${CLR_YELLOW}==> [antigravity-sandbox] Warning: Detected legacy/vulnerable git worktree at '${worktree_dir}'.${CLR_RESET}"
+        echo -e "    Legacy worktrees share the host's .git and are vulnerable to Host RCE ([VULN-01])."
+        echo -e "    Recreating '${worktree_dir}' as a fully isolated Git clone..."
+        rm -rf "${worktree_dir}"
+      elif [ -d "${worktree_dir}/.git" ]; then
+        echo "==> [antigravity-sandbox] Existing isolated git clone found at '${worktree_dir}'. Reusing..."
       else
-        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Directory '${worktree_dir}' exists but is not a valid git worktree.${CLR_RESET}" >&2
-        return 1
-      fi
-    else
-      echo "==> [antigravity-sandbox] Creating git worktree in '${worktree_dir}' on branch '${worktree_branch}'..."
-      if ! git -C "${main_repo_dir}" worktree add -B "${worktree_branch}" "${worktree_dir}"; then
-        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to create git worktree in '${worktree_dir}'.${CLR_RESET}" >&2
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Directory '${worktree_dir}' exists but is not a valid git repository.${CLR_RESET}" >&2
         return 1
       fi
     fi
 
-    mkdir -p "${main_git_dir}/hooks" "${main_git_dir}/info"
-    [ -f "${main_git_dir}/config" ] || touch "${main_git_dir}/config"
-
-    # Exclude .devcontainer/ in the main repository info/exclude
-    local exclude_file="${main_git_dir}/info/exclude"
-    if [ ! -f "${exclude_file}" ] || ! grep -q "^\.devcontainer" "${exclude_file}"; then
-      echo -e "\n# Antigravity Sandbox Dev Container\n.devcontainer/" >> "${exclude_file}"
-      echo "==> [antigravity-sandbox] Added .devcontainer/ to ${exclude_file}"
+    if [ ! -d "${worktree_dir}" ]; then
+      echo "==> [antigravity-sandbox] Creating isolated sandbox clone in '${worktree_dir}' on branch '${worktree_branch}'..."
+      # Use --no-hardlinks to ensure complete physical separation of object inodes (prevents hardlink attacks)
+      if ! git clone --no-hardlinks "${main_repo_dir}" "${worktree_dir}"; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to clone repository into '${worktree_dir}'.${CLR_RESET}" >&2
+        return 1
+      fi
+      if ! git -C "${worktree_dir}" checkout -B "${worktree_branch}"; then
+        echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Failed to switch to branch '${worktree_branch}' in '${worktree_dir}'.${CLR_RESET}" >&2
+        return 1
+      fi
     fi
 
-    # Add 4 VFS Read-Only Git metadata protection mounts
-    extra_mounts+=(
-      "source=${main_git_dir},target=${main_git_dir},type=bind"
-      "source=${main_git_dir}/hooks,target=${main_git_dir}/hooks,type=bind,readonly"
-      "source=${main_git_dir}/config,target=${main_git_dir}/config,type=bind,readonly"
-      "source=${main_git_dir}/info,target=${main_git_dir}/info,type=bind,readonly"
-    )
-
-    # Redirect target directory to worktree directory
+    # Redirect target directory to sandbox clone directory
     target_dir="${worktree_dir}"
     auto_gitignore="no"
     is_worktree=true
+  fi
+
+  # 3. Add VFS Read-Only Git metadata protection mounts (Defense-in-Depth / VULN-01 Fix)
+  # Protects against agent modifying .git/config (core.fsmonitor / core.hooksPath) or injecting hooks
+  if [ -d "${target_dir}/.git" ]; then
+    mkdir -p "${target_dir}/.git/hooks" "${target_dir}/.git/info"
+    [ -f "${target_dir}/.git/config" ] || touch "${target_dir}/.git/config"
+
+    # Exclude .devcontainer/ in info/exclude
+    local exclude_file="${target_dir}/.git/info/exclude"
+    if [ ! -f "${exclude_file}" ] || ! grep -q "^\.devcontainer" "${exclude_file}"; then
+      echo -e "\n# Antigravity Sandbox Dev Container\n.devcontainer/" >> "${exclude_file}"
+    fi
+
+    extra_mounts+=(
+      "source=\${localWorkspaceFolder}/.git/hooks,target=\${containerWorkspaceFolder}/.git/hooks,type=bind,readonly"
+      "source=\${localWorkspaceFolder}/.git/config,target=\${containerWorkspaceFolder}/.git/config,type=bind,readonly"
+      "source=\${localWorkspaceFolder}/.git/info,target=\${containerWorkspaceFolder}/.git/info,type=bind,readonly"
+    )
+  elif [ -f "${target_dir}/.git" ]; then
+    # In case of existing worktree file pointer, lock .git file as Read-Only
+    extra_mounts+=(
+      "source=\${localWorkspaceFolder}/.git,target=\${containerWorkspaceFolder}/.git,type=bind,readonly"
+    )
   fi
 
   if [ ! -d "${target_dir}" ]; then
@@ -633,6 +799,9 @@ do_init_sandbox() {
   echo "==> [antigravity-sandbox] Selected template profile: '${template}'"
   echo "==> [antigravity-sandbox] Target Antigravity CLI version: '${agy_version}'"
   echo "==> [antigravity-sandbox] Apply Antigravity CLI patch: '${agy_patch}'"
+  if [ "${agy_patch}" = "true" ] || [ "${agy_patch}" = "1" ] || [ "${agy_patch}" = "yes" ]; then
+    echo "==> [antigravity-sandbox] Patcher commit pinned: '${patcher_commit:0:12}'"
+  fi
 
   mkdir -p "${dest_devcontainer}"
 
@@ -652,6 +821,26 @@ do_init_sandbox() {
       cp "${ROOT_DIR}/base/install-agy.sh" "${dest_devcontainer}/install-agy.sh"
       chmod +x "${dest_devcontainer}/install-agy.sh"
     fi
+    local path_hash="default"
+    local folder_basename="project"
+    if [ -n "${target_dir}" ]; then
+      path_hash=$(echo -n "${target_dir}" | sha256sum | cut -c1-8)
+      folder_basename="$(basename "${target_dir}")"
+    fi
+    local project_volume="agy-gemini-data-${folder_basename}-${path_hash}"
+
+    local cache_volume="agy-cache-${folder_basename}-${path_hash}"
+    if [ "${shared_cache}" = "true" ] || [ "${shared_cache}" = "1" ] || [ "${shared_cache}" = "yes" ]; then
+      cache_volume="agy-shared-cache"
+    fi
+
+    local shared_config_mount=""
+    if [ "${shared_config}" = "readonly" ] || [ "${shared_config}" = "ro" ]; then
+      shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume,readonly"
+    elif [ "${shared_config}" = "rw" ] || [ "${shared_config}" = "true" ]; then
+      shared_config_mount="source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"
+    fi
+
     if [ -f "${dest_devcontainer}/devcontainer.json" ] && command -v jq >/dev/null 2>&1; then
       local tmp_dc
       tmp_dc="$(mktemp)"
@@ -681,24 +870,19 @@ do_init_sandbox() {
             end
           )
         | .mounts = (
-          ((.mounts // []) as $m |
-           (if ($m | any(startswith("source=agy-shared-config,target=/home/vscode/.gemini-shared"))) then
-              $m
-            else
-              ["source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume"] + $m
-            end) as $m1 |
-           (if ($m1 | any(startswith("source=agy-shared-cache,target=/home/vscode/.cache"))) then
-              $m1
-            else
-              $m1 + ["source=agy-shared-cache,target=/home/vscode/.cache,type=volume"]
-            end) as $m2 |
-           (if ($m2 | any(startswith("source=agy-gemini-data-"))) then
-              $m2
-            else
-              $m2 + ["source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume"]
-            end) as $m3 |
-           $m3 + ($extra_mounts | map(. as $x | select(($m3 | index($x)) == null)))
-          )
+          ((.mounts // []) | map(select(
+            (startswith("source=agy-shared-config") or
+             startswith("source=agy-shared-cache") or
+             startswith("source=agy-cache-") or
+             startswith("source=agy-gemini-data-")) | not
+          ))) as $filtered |
+          (if ($shared_cfg != "") then [$shared_cfg] else [] end) +
+          $filtered +
+          [
+            ("source=" + $cache_vol + ",target=/home/vscode/.cache,type=volume"),
+            ("source=" + $proj_vol + ",target=/home/vscode/.gemini,type=volume")
+          ] as $base_m |
+          $base_m + ($extra_mounts | map(. as $x | select(($base_m | index($x)) == null)))
         )
         | .remoteEnv.UV_CACHE_DIR = "/home/vscode/.cache/uv"
         | .remoteEnv.AGY_CACHE_DIR = "/home/vscode/.cache/agy-downloads"
@@ -710,19 +894,30 @@ do_init_sandbox() {
          --arg mem "${MEMORY_LIMIT}" \
          --arg cpus "${CPUS_LIMIT}" \
          --arg tmpfs "${TMPFS_SIZE}" \
+         --arg shared_cfg "${shared_config_mount}" \
+         --arg cache_vol "${cache_volume}" \
+         --arg proj_vol "${project_volume}" \
          --argjson extra_mounts "${extra_mounts_json}" \
          "${custom_filter}" \
          "${dest_devcontainer}/devcontainer.json" > "${tmp_dc}"
       mv "${tmp_dc}" "${dest_devcontainer}/devcontainer.json"
     elif [ -f "${dest_devcontainer}/devcontainer.json" ]; then
-      if ! grep -q "source=agy-shared-config" "${dest_devcontainer}/devcontainer.json"; then
-        sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-config,target=/home/vscode/.gemini-shared,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      if [ -n "${shared_config_mount}" ]; then
+        if grep -q "source=agy-shared-config" "${dest_devcontainer}/devcontainer.json"; then
+          sed -i 's|source=agy-shared-config[^",]*|'"${shared_config_mount}"'|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+        else
+          sed -i 's|"mounts": \[|"mounts": \[\n    "'"${shared_config_mount}"'",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+        fi
       fi
-      if ! grep -q "source=agy-shared-cache" "${dest_devcontainer}/devcontainer.json"; then
-        sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-shared-cache,target=/home/vscode/.cache,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      if grep -q "target=/home/vscode/.cache" "${dest_devcontainer}/devcontainer.json"; then
+        sed -i -E 's|source=[^",]+,target=/home/vscode/\.cache|source='"${cache_volume}"',target=/home/vscode/.cache|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      else
+        sed -i 's|"mounts": \[|"mounts": \[\n    "source='"${cache_volume}"',target=/home/vscode/.cache,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
       fi
-      if ! grep -q "source=agy-gemini-data-" "${dest_devcontainer}/devcontainer.json"; then
-        sed -i 's|"mounts": \[|"mounts": \[\n    "source=agy-gemini-data-${localWorkspaceFolderBasename},target=/home/vscode/.gemini,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      if grep -q "source=agy-gemini-data-" "${dest_devcontainer}/devcontainer.json"; then
+        sed -i -E 's|source=agy-gemini-data-[^",]+|source='"${project_volume}"'|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
+      else
+        sed -i 's|"mounts": \[|"mounts": \[\n    "source='"${project_volume}"',target=/home/vscode/.gemini,type=volume",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
       fi
       if ! grep -q "UV_CACHE_DIR" "${dest_devcontainer}/devcontainer.json"; then
         sed -i 's|"remoteEnv": {|"remoteEnv": {\n    "UV_CACHE_DIR": "/home/vscode/.cache/uv",\n    "AGY_CACHE_DIR": "/home/vscode/.cache/agy-downloads",|' "${dest_devcontainer}/devcontainer.json" 2>/dev/null || true
@@ -730,7 +925,7 @@ do_init_sandbox() {
     fi
   else
     echo "==> [antigravity-sandbox] Assembling declarative template from base..."
-    assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}" "${agy_version}" "${agy_patch}" "${extra_mounts_json}"
+    assemble_declarative_template "${template_path}" "${template}" "${dest_devcontainer}" "${agy_version}" "${agy_patch}" "${extra_mounts_json}" "${patcher_commit}" "${patcher_repo}" "${target_dir}" "${shared_config}" "${shared_cache}"
   fi
 
   if [ -f "${dest_devcontainer}/setup.sh" ]; then
@@ -788,15 +983,17 @@ do_init_sandbox() {
   echo -e "${CLR_GREEN}======================================================================${CLR_RESET}"
   echo "Template: '${template}'"
   if [ "${is_worktree}" = "true" ]; then
-    echo "Mode: Isolated Git Worktree on branch '${worktree_branch}'"
-    echo "Host git hooks and config protected as Read-Only via VFS bind mounts."
+    echo "Mode: Isolated Sandbox Clone on branch '${worktree_branch}'"
+    echo "Host repository is 100% physically isolated; sandbox .git metadata locked as Read-Only."
   fi
   echo "Next steps:"
-  echo " 1. Open the project in VS Code / Cursor: code ${target_dir}"
+  echo " 1. Open the sandbox in VS Code / Cursor: code ${target_dir}"
   echo " 2. Press F1 -> 'Dev Containers: Reopen in Container'"
   echo " 3. Antigravity Agent will run safely inside the isolated container"
   if [ "${is_worktree}" = "true" ]; then
-    echo " Note: All modifications are isolated in the git worktree and '${worktree_branch}' branch."
+    echo " 4. When finished, safely review and merge changes into your main repo on host:"
+    echo "    agy-sandbox --review ${main_repo_dir:-<main_repo>} ${worktree_branch}"
+    echo "    (or manually: cd ${main_repo_dir:-<main_repo>} && git fetch ${target_dir} ${worktree_branch} && git diff HEAD..FETCH_HEAD)"
   fi
   echo -e "${CLR_GREEN}======================================================================${CLR_RESET}"
 }
@@ -1051,12 +1248,13 @@ tui_init_wizard() {
 
   if [ -d "${target_dir}" ] && git -C "${target_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo ""
-    echo -e "${CLR_BOLD}Git Worktree Isolation (FEAT-01):${CLR_RESET}"
+    echo -e "${CLR_BOLD}Repository Isolation Mode (FEAT-01 / VULN-01 Fix):${CLR_RESET}"
     echo -e "  Target directory is a Git repository. You can isolate the agent"
-    echo -e "  inside an isolated worktree branch with read-only .git metadata protection."
+    echo -e "  inside a standalone clone with full protection of your main repository"
+    echo -e "  and read-only .git metadata enforcement."
     echo ""
     echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}No${CLR_RESET}  - Configure sandbox directly inside '${target_dir}' (Default)"
-    echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}Yes${CLR_RESET} - Create isolated Git worktree (e.g. '${target_dir}-sandbox')"
+    echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}Yes${CLR_RESET} - Create isolated sandbox clone (e.g. '${target_dir}-sandbox')"
     echo ""
 
     local rc=0
@@ -1126,25 +1324,30 @@ tui_init_wizard() {
 
   echo ""
   echo -e "${CLR_BOLD}Antigravity CLI Version Selection:${CLR_RESET}"
-  echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}default (${DEFAULT_AGY_VERSION})${CLR_RESET} - Pinned stable release (Recommended)"
-  echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}latest${CLR_RESET}          - Always install latest upstream release"
-  echo -e "  ${CLR_BOLD}[3]${CLR_RESET} ${CLR_CYAN}custom${CLR_RESET}          - Specify custom version tag (e.g. 1.4.5, v1.4.7)"
+  echo -e "  ${CLR_BOLD}[1]${CLR_RESET} ${CLR_CYAN}stable (${PINNED_STABLE_VERSION})${CLR_RESET} - Pinned release (Recommended with patch)"
+  echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}latest${CLR_RESET}                 - Always install latest upstream release"
+  echo -e "  ${CLR_BOLD}[3]${CLR_RESET} ${CLR_CYAN}custom${CLR_RESET}                 - Specify custom version tag (e.g. 1.5.3, v1.5.3)"
   echo ""
+
+  local default_v_choice="1"
+  if [ "${DEFAULT_AGY_PINNED}" = "false" ]; then
+    default_v_choice="2"
+  fi
 
   local selected_version="${DEFAULT_AGY_VERSION}"
   while true; do
     local rc=0
-    local v_choice="1"
-    read -r -p "Select version option [1-3, default: 1]: " v_choice || rc=$?
+    local v_choice="${default_v_choice}"
+    read -r -p "Select version option [1-3, default: ${default_v_choice}]: " v_choice || rc=$?
     if [ "$rc" -gt 128 ]; then
       echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
       sleep 0.5
       return 130
     fi
-    v_choice="${v_choice:-1}"
+    v_choice="${v_choice:-${default_v_choice}}"
     case "${v_choice}" in
       1)
-        selected_version="${DEFAULT_AGY_VERSION}"
+        selected_version="${PINNED_STABLE_VERSION}"
         break
         ;;
       2)
@@ -1155,7 +1358,7 @@ tui_init_wizard() {
         while true; do
           local rc_custom=0
           local custom_tag=""
-          read -r -p "Enter version tag (e.g. 1.4.5, v1.4.7) or 'cancel': " custom_tag || rc_custom=$?
+          read -r -p "Enter version tag (e.g. 1.5.3, v1.5.3) or 'cancel': " custom_tag || rc_custom=$?
           if [ "$rc_custom" -gt 128 ] || [ "${custom_tag}" = "cancel" ] || [ "${custom_tag}" = "q" ]; then
             break
           fi
@@ -1167,7 +1370,7 @@ tui_init_wizard() {
             selected_version="${custom_tag}"
             break 2
           else
-            echo -e "${CLR_RED}Invalid version format '${custom_tag}'. Expected e.g. '1.4.5' or 'v1.4.7'.${CLR_RESET}"
+            echo -e "${CLR_RED}Invalid version format '${custom_tag}'. Expected e.g. '1.5.3' or 'v1.5.3'.${CLR_RESET}"
           fi
         done
         ;;
@@ -1183,11 +1386,16 @@ tui_init_wizard() {
   echo -e "  ${CLR_BOLD}[2]${CLR_RESET} ${CLR_CYAN}No${CLR_RESET}  - Keep clean official binary without modifications"
   echo ""
 
-  local selected_patch="true"
+  local default_p_choice="1"
+  if [ "${DEFAULT_AGY_PATCH}" = "false" ] || [ "${DEFAULT_AGY_PATCH}" = "0" ] || [ "${DEFAULT_AGY_PATCH}" = "no" ]; then
+    default_p_choice="2"
+  fi
+
+  local selected_patch="${DEFAULT_AGY_PATCH}"
   while true; do
     local rc=0
-    local p_choice="1"
-    read -r -p "Apply patch? [1-2, default: 1]: " p_choice || rc=$?
+    local p_choice="${default_p_choice}"
+    read -r -p "Apply patch? [1-2, default: ${default_p_choice}]: " p_choice || rc=$?
     if [ "$rc" -gt 128 ]; then
       echo -e "\n${CLR_YELLOW}==> [antigravity-sandbox] Wizard cancelled.${CLR_RESET}"
       sleep 0.5
@@ -1276,12 +1484,16 @@ tui_init_wizard() {
   echo -e "${CLR_BOLD}${CLR_CYAN}═════════════════════════════════════════════════════════════${CLR_RESET}"
   echo -e "  Target Directory: ${CLR_BOLD}${target_dir}${CLR_RESET}"
   if [ "${use_worktree}" = "true" ]; then
-    echo -e "  Git Worktree:     ${CLR_GREEN}Enabled (branch: ${worktree_branch}, path: ${target_dir}-sandbox)${CLR_RESET}"
+    echo -e "  Git Isolation:    ${CLR_GREEN}Enabled (branch: ${worktree_branch}, path: ${target_dir}-sandbox)${CLR_RESET}"
   else
-    echo -e "  Git Worktree:     ${CLR_DIM}Disabled (direct repository setup)${CLR_RESET}"
+    echo -e "  Git Isolation:    ${CLR_DIM}Disabled (direct repository setup)${CLR_RESET}"
   fi
   echo -e "  Template Profile: ${CLR_CYAN}${selected_template}${CLR_RESET}"
   echo -e "  Antigravity CLI:  ${CLR_CYAN}${selected_version}${CLR_RESET} (Patched: ${selected_patch})"
+  if [ "${selected_patch}" = "true" ] || [ "${selected_patch}" = "1" ] || [ "${selected_patch}" = "yes" ]; then
+    local p_commit="${CLI_PATCHER_COMMIT:-${DEFAULT_PATCHER_COMMIT}}"
+    echo -e "  Patcher Commit:   ${CLR_CYAN}${p_commit:0:12}${CLR_RESET}"
+  fi
   if [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
     echo -e "  Custom Mounts:    ${CLR_GREEN}${#CLI_MOUNTS[@]} mount(s)${CLR_RESET}"
     for cm in "${CLI_MOUNTS[@]}"; do
@@ -1303,7 +1515,7 @@ tui_init_wizard() {
   fi
 
   echo ""
-  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}" "${use_worktree}" "${worktree_branch}"
+  do_init_sandbox "${target_dir}" "${selected_template}" "${add_git}" "${selected_version}" "${selected_patch}" "${use_worktree}" "${worktree_branch}" "${CLI_PATCHER_COMMIT:-${DEFAULT_PATCHER_COMMIT}}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG:-${DEFAULT_SHARED_CONFIG}}" "${CLI_SHARED_CACHE:-${DEFAULT_SHARED_CACHE}}"
   pause_enter
 }
 
@@ -1385,8 +1597,15 @@ run_tui() {
 # ========================================================
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  CLI_VERSION="${AGY_VERSION:-${DEFAULT_AGY_VERSION}}"
-  CLI_PATCH="${AGY_PATCH:-${DEFAULT_AGY_PATCH}}"
+  CLI_VERSION_SET=false
+  CLI_PINNED_SET=false
+  CLI_PINNED="${AGY_PINNED:-}"
+  [ -n "${CLI_PINNED}" ] && CLI_PINNED_SET=true
+  CLI_VERSION=""
+  CLI_PATCH="${DEFAULT_AGY_PATCH}"
+  CLI_PATCHER_COMMIT="${DEFAULT_PATCHER_COMMIT}"
+  CLI_SHARED_CONFIG="${DEFAULT_SHARED_CONFIG}"
+  CLI_SHARED_CACHE="${DEFAULT_SHARED_CACHE}"
   CLI_WORKTREE=false
   CLI_WORKTREE_BRANCH="agy-sandbox"
   CLI_MOUNTS=()
@@ -1419,22 +1638,27 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         shift
         exec "${SCRIPT_DIR}/prune-containers.sh" "$@"
         ;;
+      --review|-r|review)
+        shift
+        do_review_sandbox "$@"
+        exit $?
+        ;;
       --interactive|-i)
         FORCE_INTERACTIVE=true
         shift
         ;;
-      -w|--worktree)
+      -w|--worktree|--isolate|--clone)
         CLI_WORKTREE=true
         shift
         ;;
-      --worktree-branch=*)
+      --worktree-branch=*|--branch=*)
         CLI_WORKTREE_BRANCH="${1#*=}"
         CLI_WORKTREE=true
         shift
         ;;
-      --worktree-branch)
+      --worktree-branch|--branch)
         if [ -z "${2:-}" ]; then
-          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing branch name for --worktree-branch${CLR_RESET}" >&2
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing branch name for $1${CLR_RESET}" >&2
           exit 1
         fi
         CLI_WORKTREE_BRANCH="$2"
@@ -1459,11 +1683,22 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
           exit 1
         fi
         if ! validate_version_format "$2"; then
-          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid version format '$2'. Expected 'latest' or SemVer tag (e.g. '1.4.6' or 'v1.4.6').${CLR_RESET}" >&2
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid version format '$2'. Expected 'latest' or SemVer tag (e.g. '1.5.3' or 'v1.5.3').${CLR_RESET}" >&2
           exit 1
         fi
         CLI_VERSION="$2"
+        CLI_VERSION_SET=true
         shift 2
+        ;;
+      --pin|--pinned)
+        CLI_PINNED="true"
+        CLI_PINNED_SET=true
+        shift
+        ;;
+      --no-pin|--unpinned)
+        CLI_PINNED="false"
+        CLI_PINNED_SET=true
+        shift
         ;;
       --patch)
         CLI_PATCH="true"
@@ -1473,19 +1708,72 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         CLI_PATCH="false"
         shift
         ;;
+      --patcher-commit)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing commit SHA for --patcher-commit${CLR_RESET}" >&2
+          exit 1
+        fi
+        if [[ ! "$2" =~ ^[a-f0-9]{40}$ ]]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid commit SHA '$2'. Expected a 40-character Git commit hash.${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_PATCHER_COMMIT="$2"
+        shift 2
+        ;;
+      --patcher-commit=*)
+        val="${1#*=}"
+        if [[ ! "$val" =~ ^[a-f0-9]{40}$ ]]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Invalid commit SHA '$val'. Expected a 40-character Git commit hash.${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_PATCHER_COMMIT="$val"
+        shift
+        ;;
+      --shared-config=*)
+        CLI_SHARED_CONFIG="${1#*=}"
+        shift
+        ;;
+      --shared-config)
+        if [ -z "${2:-}" ]; then
+          echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Missing value for --shared-config${CLR_RESET}" >&2
+          exit 1
+        fi
+        CLI_SHARED_CONFIG="$2"
+        shift 2
+        ;;
+      --shared-cache)
+        CLI_SHARED_CACHE="true"
+        shift
+        ;;
+      --no-shared-cache|--isolated-cache)
+        CLI_SHARED_CACHE="false"
+        shift
+        ;;
+      --shared-cache=*)
+        CLI_SHARED_CACHE="${1#*=}"
+        shift
+        ;;
       -h|--help|help)
         echo "Usage: agy-sandbox [OPTIONS] [TARGET_DIR] [TEMPLATE]"
+        echo "       agy-sandbox --review [TARGET_DIR] [BRANCH]"
         echo ""
         echo "Without arguments in interactive terminal, launches the Antigravity TUI."
         echo ""
         echo "Options:"
         echo "  -i, --interactive              Launch interactive terminal user interface"
-        echo "  -w, --worktree                 Create and run sandbox inside an isolated Git worktree"
-        echo "  --worktree-branch <name>       Git branch for worktree (default: 'agy-sandbox', implies --worktree)"
+        echo "  -w, --worktree, --isolate      Create and run sandbox inside an isolated Git clone"
+        echo "  --worktree-branch <name>       Git branch for sandbox clone (default: 'agy-sandbox', implies --worktree)"
+        echo "  -r, --review [DIR] [BRANCH]    Safely fetch and review sandbox changes in main repository"
         echo "  --mount <host:container[:ro|rw]> Bind mount host path into container (default mode: ro)"
-        echo "  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. '1.4.6', 'latest')"
+        echo "  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. '1.5.3', 'latest')"
+        echo "  --pin, --pinned                Force version pinning (locks binary chmod 555, disables auto-update)"
+        echo "  --no-pin, --unpinned           Disable pinning (uses 'latest' unless -v specified, auto-update enabled)"
         echo "  --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)"
         echo "  --no-patch, --skip-patch       Disable patch, keep clean official binary"
+        echo "  --patcher-commit <sha>         Pin specific 40-character Git commit SHA for eligibility patcher"
+        echo "  --shared-config <mode>         Shared auth/config mount mode (readonly|rw|none, default: readonly)"
+        echo "  --shared-cache                 Share package and binary cache across sandboxes"
+        echo "  --no-shared-cache              Isolate package cache per sandbox (default: isolated)"
         echo "  -l, --list                     List available sandbox templates"
         echo "  -d, --diagnose, diagnose       Run security audit & boundary diagnostics"
         echo "  -c, --clean, --prune           Clean up residual/orphaned containers and build artifacts"
@@ -1497,6 +1785,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  agy-sandbox /path/to/project node"
         echo "  agy-sandbox --worktree /path/to/project python"
         echo "  agy-sandbox --worktree --worktree-branch experiment-1 /path/to/project"
+        echo "  agy-sandbox --review /path/to/project agy-sandbox"
         echo "  agy-sandbox --mount /var/data/shared:/data:ro /path/to/project"
         exit 0
         ;;
@@ -1514,6 +1803,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     esac
   done
 
+  # Resolve CLI version and pinning if not explicitly passed via -v
+  if [ "$CLI_VERSION_SET" = false ]; then
+    if [ "$CLI_PINNED_SET" = false ]; then
+      # Pinning was not explicitly mentioned ("без упоминания pinning"):
+      # Automatically enabled with patch, and disabled without it.
+      case "${CLI_PATCH}" in
+        true|1|yes) CLI_PINNED="true" ;;
+        *)          CLI_PINNED="false" ;;
+      esac
+    fi
+    if [ "${CLI_PINNED}" = "true" ] || [ "${CLI_PINNED}" = "1" ] || [ "${CLI_PINNED}" = "yes" ]; then
+      CLI_VERSION="${PINNED_STABLE_VERSION}"
+    else
+      CLI_VERSION="latest"
+    fi
+  fi
+
   if [ "$FORCE_INTERACTIVE" = true ]; then
     run_tui
     exit 0
@@ -1522,7 +1828,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # If no arguments provided:
   if [ -z "$TARGET_DIR" ]; then
     if [ "$CLI_WORKTREE" = true ] || [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
-      do_init_sandbox "." "default" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}"
+      do_init_sandbox "." "default" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"
       exit 0
     fi
     if [ -t 0 ] && [ -t 1 ]; then
@@ -1530,12 +1836,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       exit 0
     else
       # Non-interactive headless fallback when piped or called in CI without args
-      do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}"
+      do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"
       exit 0
     fi
   fi
 
   # Positional arguments provided: agy-sandbox <target_dir> [template]
   TEMPLATE="${TEMPLATE:-default}"
-  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}"
+  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"
 fi

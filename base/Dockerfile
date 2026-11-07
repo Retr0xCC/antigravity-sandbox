@@ -47,7 +47,7 @@ ENV HOME=/home/vscode
 ENV PATH="/home/vscode/.antigravity/bin:/home/vscode/.local/bin:${PATH}"
 
 # Pin specific CLI version
-ARG AGY_VERSION=1.4.6
+ARG AGY_VERSION=1.5.3
 ENV AGY_VERSION=${AGY_VERSION}
 
 # Install antigravity-cli for unprivileged user

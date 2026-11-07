@@ -126,7 +126,7 @@ agy-sandbox
 # Or initialize directly via arguments:
 agy-sandbox /path/to/project
 agy-sandbox /path/to/project [template]
-agy-sandbox /path/to/project [template] -v 1.4.6
+agy-sandbox /path/to/project [template] -v 1.5.3
 ```
 
 #### CLI Parameters
@@ -138,12 +138,19 @@ When run without arguments in an interactive terminal, opens the interactive men
 
 Options:
   -i, --interactive              Interactive project, template, and version selection (TUI)
-  -w, --worktree                 Create and run sandbox inside an isolated Git worktree
-  --worktree-branch <name>       Git branch for worktree (default: 'agy-sandbox', implies --worktree)
+  -w, --worktree, --isolate      Create and run sandbox inside an isolated Git clone
+  --worktree-branch <name>       Git branch for sandbox clone (default: 'agy-sandbox', implies --worktree)
+  -r, --review [DIR] [BRANCH]    Safely fetch and review sandbox changes in main repository
   --mount <host:container[:ro|rw]> Bind mount host path into container (default mode: ro)
-  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. 1.4.6, latest)
+  -v, --agy-version <tag>        Pin specific Antigravity CLI version (e.g. 1.5.3, latest)
+  --pin, --pinned                Force version pinning (locks binary chmod 555, disables auto-update)
+  --no-pin, --unpinned           Disable pinning (uses 'latest' unless -v specified, auto-update enabled)
   --patch                        Apply QNIX-Dev eligibility patch to CLI binary (default)
   --no-patch, --skip-patch       Disable patch, keep clean official binary
+  --patcher-commit <sha>         Pin specific 40-character Git commit SHA for eligibility patcher
+  --shared-config <mode>         Shared auth/config mount mode (readonly|rw|none, default: readonly)
+  --shared-cache                 Share package and binary cache across sandboxes
+  --no-shared-cache              Isolate package cache per sandbox (default: isolated)
   -l, --list                     List available templates
   -d, --diagnose                 Audit and diagnose security guardrails & network rules
   --service [COMMAND]            Manage systemd service (status | enable | disable | install)
@@ -154,24 +161,35 @@ Examples:
   agy-sandbox /path/to/project node
   agy-sandbox --worktree /path/to/project python
   agy-sandbox --worktree --worktree-branch experiment-1 /path/to/project
+  agy-sandbox --review /path/to/project agy-sandbox
   agy-sandbox --mount /tmp/datasets:/data:ro /path/to/project
 ```
 
-#### Git Worktree Isolation Mode (`--worktree`)
+#### Full Repository Isolation Mode (Isolated Sandbox Clone, `--worktree` / `--isolate`)
 
-When developing on existing repositories, giving an AI coding agent direct write access to your main project working tree creates risks: a hallucinating or compromised agent could modify build scripts, configuration files, or hook scripts that you might later execute on your host machine.
+When developing on existing repositories, giving an AI coding agent direct write access to your main project working tree creates risks: a compromised model could modify build scripts, configuration files, or hook scripts that you might later execute on your host machine.
 
-The `--worktree` flag provides complete filesystem separation using Git worktrees:
+The `--worktree` flag (aliases: `--isolate`, `--clone`) provides strict physical isolation based on a standalone local Git clone with VFS Read-Only metadata protection:
 
-* **Adjacent Sandbox Directory:** The initializer automatically checks out an isolated Git worktree adjacent to your repository (`<repo>-sandbox`) on a dedicated branch (default: `agy-sandbox`, customizable via `--worktree-branch <branch>`).
-* **VFS Read-Only Protection for Git Metadata:** Inside the worktree, Git requires access to the parent `.git` common directory. The sandbox mounts the parent `.git` directory and overlays kernel VFS Read-Only bind mounts directly on `.git/hooks`, `.git/config`, and `.git/info`. This physically blocks the container from writing malicious Git hooks (e.g. `pre-commit`) or modifying Git configuration to execute arbitrary code on the host.
-* **Safe Exclusion:** `.devcontainer/` is added to `${main_git_dir}/info/exclude`, ensuring that container configurations never clutter git status or get committed into the repository.
-* **Recommended Workflow:**
+* **Physical Isolation of the Host Repository (Fix VULN-01):** Instead of an insecure shared `.git` directory (as in traditional `git worktree`, where `.git` pointer hijacking or corrupting `refs/heads/main` led to Host RCE), the sandbox deploys as an **independent clone** (`<repo>-sandbox`) on the `agy-sandbox` branch with `--no-hardlinks`. The host's main repository directory is **never mounted into the container** (0% attack surface against your `main` branch, commit history, index, or host submodules).
+* **Hardlink Attack Prevention (`--no-hardlinks`):** Cloning without hard links guarantees that Git object files inside the sandbox have independent filesystem inodes and are physically separated from host files.
+* **VFS Read-Only Protection for Git Metadata:** Inside the sandbox clone, `.git/hooks`, `.git/info`, and the `.git/config` file are mounted by the Linux kernel with `readonly` flags. This physically blocks the container from modifying Git configuration (directives like `core.fsmonitor`, `core.hooksPath`, `core.sshCommand`) or injecting malicious executable hooks.
+* **Safe Exclusion:** `.devcontainer/` is added to `.git/info/exclude` in the sandbox, ensuring that container configurations never clutter git status or get committed.
+* **Safe Review & Merge Workflow:**
   1. Initialize sandbox: `agy-sandbox --worktree /path/to/project`
-  2. Open the worktree: `code /path/to/project-sandbox`
+  2. Open the sandbox in VS Code: `code /path/to/project-sandbox`
   3. Reopen in Container (`F1` -> `Dev Containers: Reopen in Container`).
-  4. Allow the agent to perform coding tasks inside the worktree.
-  5. On your host machine, review the changes via `git diff main..agy-sandbox`, run local verification tests, and safely merge the branch when satisfied.
+  4. Allow the agent to perform coding tasks inside the sandbox.
+  5. On your host machine, safely review changes with a single command:
+     ```bash
+     agy-sandbox --review /path/to/project agy-sandbox
+     ```
+     (or manually: `cd /path/to/project && git fetch /path/to/project-sandbox agy-sandbox && git diff HEAD..FETCH_HEAD`).
+     Because changes are fetched strictly over the Git transport protocol (`upload-pack`), Git on the host only pulls commit and tree objects and never reads or executes configuration files or hooks from the sandbox.
+  6. Safely merge the reviewed changes:
+     ```bash
+     cd /path/to/project && git merge FETCH_HEAD
+     ```
 
 #### Secure Custom Mounts (`--mount`)
 
@@ -199,12 +217,23 @@ Any attempt to mount a blacklisted path immediately terminates initialization wi
 
 #### Antigravity CLI Version Pinning & Binary Patching
 
-By default, sandboxes deploy with a pinned stable CLI version (`1.4.6`), preventing breaking changes from unexpected upstream updates, and apply the `QNIX-Dev` eligibility patch.
+By default, sandboxes deploy with a pinned stable CLI version (`1.5.3`), preventing breaking changes from unexpected upstream updates, and apply the `QNIX-Dev` eligibility patch.
 
-* **Single Control Variable:** Setting `AGY_VERSION` controls both the installed release and security lockdown. When pinned (`AGY_VERSION != latest`), the sandbox automatically locks the binary (`chmod 555`) and blocks auto-updates (`AGY_CLI_DISABLE_AUTO_UPDATE=true` in `~/.bashrc`). For `latest`, the binary retains standard permissions (`chmod 755`) and self-updates remain enabled.
-* **Optional Patching:** Pass `--no-patch` (or select `No` in TUI Step 4) to keep the clean, unmodified official binary. Use `--patch` to explicitly enable it.
-* **Persistent Defaults in `base/devcontainer.json`:** To permanently change default versions and patching behavior for all new sandboxes, simply edit `base/devcontainer.json` (`build.args.AGY_VERSION`, `remoteEnv.AGY_VERSION`, and `remoteEnv.AGY_PATCH`). The initializer automatically derives its defaults directly from this file.
-* **Interactive TUI & CLI:** Wizard steps allow choosing between default stable (`1.4.6`), `latest`, custom tags, and toggling the patcher. CLI flags `-v, --agy-version <tag>` and `--no-patch` allow non-interactive specification.
+* **Centralized Configuration via `scripts/sandbox.conf` (SSOT):** Parameters `AGY_VERSION`, `AGY_PATCH`, `AGY_PINNED`, `PATCHER_REPO`, and `PATCHER_COMMIT` are configured in `sandbox.conf`. When pinned (`AGY_VERSION != latest`), the sandbox automatically locks the binary (`chmod 555`) and blocks auto-updates (`AGY_CLI_DISABLE_AUTO_UPDATE=true` in `~/.bashrc`). For `latest`, the binary retains standard permissions (`chmod 755`) and self-updates remain enabled.
+* **Automatic Pinning ("Pinning without explicit mention"):** When `AGY_PINNED` is left empty (`""`), pinning is automatically enabled with the patch (`AGY_PATCH="true" -> AGY_PINNED="true"`), preventing breaking changes from unexpected upstream updates. When the patch is disabled (`--no-patch` or `AGY_PATCH="false"`), pinning is automatically disabled (`AGY_PINNED="false"`), defaulting to the clean official `latest` release with auto-updates permitted.
+* **Explicit Pinning Overrides:** CLI flags `--pin` and `--no-pin` (or setting `AGY_PINNED="true"` / `"false"` in `sandbox.conf`) allow overriding the automatic inference (e.g., pinning a clean unmodified version `1.5.3` via `--no-patch --pin`).
+* **Patcher Version Selection:** The eligibility patcher version is immutably pinned by commit SHA via `PATCHER_COMMIT` in `sandbox.conf` or the `--patcher-commit <sha>` CLI flag, guaranteeing supply chain integrity (Supply Chain Pinning).
+* **Interactive TUI & CLI:** Wizard steps allow choosing between default stable (`1.5.3`), `latest`, custom tags, and toggling the patcher. CLI flags `-v, --agy-version <tag>`, `--pin`, `--no-pin`, `--no-patch`, and `--patcher-commit <sha>` allow non-interactive specification.
+
+#### Cross-Container Isolation & Shared Volume Hardening (Fix VULN-02)
+
+When running multiple sandboxes across different projects (especially with untrusted external code), sharing Read-Write volumes presents severe risks of Cross-Sandbox RCE, cache poisoning, and token theft. The sandbox implements strict defense-in-depth boundaries:
+
+* **MCP Configuration Isolation (`config/mcp_config.json`):** The `mcp_config.json` file is strictly excluded from shared volumes and stored only inside the project-isolated volume `~/.gemini/config/`. This eliminates the possibility of one container injecting malicious MCP server commands into other sandboxes.
+* **VFS Read-Only Mount for Global Config (`SHARED_CONFIG="readonly"`):** The global volume `agy-shared-config` is mounted by the Linux kernel into `/home/vscode/.gemini-shared` as `readonly`. OAuth tokens and global settings are safely inherited using Copy-on-Initialize into the local project volume on container creation, enabling local session updates without modifying global state.
+* **Cryptographic Release Verification (SHA256):** `install-agy.sh` computes and validates SHA256 checksums for both newly downloaded and cached release tarballs in `/home/vscode/.cache/agy-downloads`, completely preventing supply chain cache poisoning attacks.
+* **Per-Project Cache Isolation (`SHARED_CACHE="false"`):** By default, each project uses its own dedicated cache volume (`agy-cache-<project>-<hash>`), eliminating dependency poisoning vectors across untrusted projects (Python wheels in UV_CACHE_DIR, go build cache, npm).
+* **Deterministic Path Hashing for Project Volumes:** Project volume names are constructed as `agy-gemini-data-<folder_basename>-<path_hash>`, where `<path_hash>` is an 8-character SHA256 digest of the host directory path. Projects with identical folder names in different directories are guaranteed distinct volumes.
 
 Available template profiles:
 - `default` (default) — Clean base environment: antigravity-cli, uv, git, and a standard set of build tools.
@@ -245,6 +274,13 @@ The sandbox network stack uses a single centralized configuration file `scripts/
 | `MEMORY_LIMIT` | `"8g"` | Maximum container RAM allocation limit. |
 | `CPUS_LIMIT` | `"4"` | Maximum container CPU cores limit. |
 | `TMPFS_SIZE` | `"2g"` | Size of the in-memory `/tmp` mount (`rw,nosuid,nodev`). |
+| `AGY_VERSION` | `"1.5.3"` | Target Antigravity CLI version to install (`"1.5.3"`, `"latest"`, or specific SemVer tag). |
+| `AGY_PATCH` | `"true"` | Apply QNIX-Dev eligibility patch to CLI binary (`"true"` or `"false"`). |
+| `AGY_PINNED` | `""` | Version pinning & auto-update lockdown (`"true"`, `"false"`, or `""`). When empty, pinning is automatically enabled when patch is active (`AGY_PATCH="true"`) and automatically disabled when patch is inactive (`AGY_PATCH="false"`, switching default to `latest`). |
+| `PATCHER_REPO` | `"https://github.com/QNIX-Dev/eligibility-antigravity-patcher.git"` | Git repository URL for the QNIX-Dev eligibility patcher. |
+| `PATCHER_COMMIT` | `"90498f50353d414232f593dffe88899bc80b6312"` | Pinned commit hash (40-character immutable SHA) of the QNIX-Dev patcher. |
+| `SHARED_CONFIG` | `"readonly"` | Global configuration mount mode for `/home/vscode/.gemini-shared` (`"readonly"`, `"isolated"`, or `"rw"`). In `"readonly"` mode, tokens are safely inherited via Copy-on-Initialize into the local project volume without exposing global state to writes (Fix VULN-02). |
+| `SHARED_CACHE` | `"false"` | Package and binary download cache isolation mode for `/home/vscode/.cache` (`"false"` enforces per-project cache volumes `agy-cache-<project>-<hash>` to prevent dependency poisoning; `"true"` enables global shared cache `agy-shared-cache`). |
 
 All variables in `sandbox.conf` can be overridden by environment variables without modifying the file directly:
 
