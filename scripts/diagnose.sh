@@ -870,6 +870,20 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       log_fail "scripts/init-sandbox.sh: Missing postAttachCommand or remote.autoForwardPorts enforcement (VULN-04 risk!)."
     fi
 
+    # VULN-05 verification: target directory security blacklist validation
+    if grep -q "validate_target_dir" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
+       grep -q "Cannot initialize sandbox directly in user root HOME directory" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
+      log_pass "scripts/init-sandbox.sh: Target directory blacklist validation enforced (validate_target_dir, VULN-05)."
+    else
+      log_fail "scripts/init-sandbox.sh: Missing target directory blacklist validation (VULN-05 risk!)."
+    fi
+
+    if grep -A 20 "do_init_sandbox()" "${ROOT_DIR}/scripts/init-sandbox.sh" | grep -q "validate_target_dir"; then
+      log_pass "scripts/init-sandbox.sh: do_init_sandbox verifies target_dir against host blacklist (VULN-05)."
+    else
+      log_fail "scripts/init-sandbox.sh: do_init_sandbox does not validate target_dir (VULN-05 risk!)."
+    fi
+
     # Review command support
     if grep -q -- "--review" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
       log_pass "scripts/init-sandbox.sh: Safe review workflow command (--review) supported."

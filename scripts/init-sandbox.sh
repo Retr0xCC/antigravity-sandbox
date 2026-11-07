@@ -526,6 +526,57 @@ expand_path() {
   echo "$p"
 }
 
+validate_target_dir() {
+  local dir_raw="$1"
+  if [ -z "${dir_raw}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory cannot be empty.${CLR_RESET}" >&2
+    return 1
+  fi
+
+  local dir_path
+  dir_path="$(expand_path "${dir_raw}")"
+  local canonical_target
+  canonical_target="$(realpath -m "${dir_path}" 2>/dev/null || echo "${dir_path}")"
+
+  # 1. Root filesystem
+  if [ "${canonical_target}" = "/" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Root filesystem '/' cannot be used as sandbox target directory!${CLR_RESET}" >&2
+    return 1
+  fi
+
+  # 2. Critical host system directories
+  local sys_dirs=("/etc" "/usr" "/var" "/bin" "/sbin" "/lib" "/lib64" "/proc" "/sys" "/dev" "/run" "/root")
+  for s_dir in "${sys_dirs[@]}"; do
+    if [ "${canonical_target}" = "${s_dir}" ] || [[ "${canonical_target}" == "${s_dir}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: '${canonical_target}' is in system directory '${s_dir}' and cannot be used as sandbox target directory!${CLR_RESET}" >&2
+      return 1
+    fi
+  done
+
+  # 3. User root HOME directory itself (Fix VULN-05)
+  local canonical_home
+  canonical_home="$(realpath -m "${HOME:-/home/$(whoami)}" 2>/dev/null || echo "${HOME}")"
+  if [ -n "${canonical_home}" ] && [ "${canonical_target}" = "${canonical_home}" ]; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Cannot initialize sandbox directly in user root HOME directory ('${canonical_home}')!${CLR_RESET}" >&2
+    echo -e "    Mounting the entire home directory exposes host secrets (~/.ssh, ~/.gnupg, ~/.bashrc) to the container." >&2
+    echo -e "    Please specify a dedicated project subdirectory (e.g. 'agy-sandbox ~/projects/my-project')." >&2
+    return 1
+  fi
+
+  # 4. Sensitive credential and configuration directories under user HOME
+  local sens_dirs=(".ssh" ".gnupg" ".aws" ".kube" ".config" ".docker" ".local" ".azure" ".password-store")
+  for s_sub in "${sens_dirs[@]}"; do
+    local s_path="${canonical_home}/${s_sub}"
+    if [ "${canonical_target}" = "${s_path}" ] || [[ "${canonical_target}" == "${s_path}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: '${canonical_target}' is a sensitive directory ('${s_sub}') and cannot be used as sandbox target directory!${CLR_RESET}" >&2
+      return 1
+    fi
+  done
+
+  echo "${canonical_target}"
+  return 0
+}
+
 validate_and_parse_mount() {
   local spec="$1"
   if [ -z "${spec}" ]; then
@@ -632,10 +683,14 @@ validate_and_parse_mount() {
 }
 
 do_review_sandbox() {
-  local target_dir="${1:-.}"
+  local target_dir_raw="${1:-.}"
   local branch="${2:-agy-sandbox}"
 
-  target_dir="$(expand_path "${target_dir}")"
+  local target_dir=""
+  if ! target_dir="$(validate_target_dir "${target_dir_raw}")"; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Review target directory validation failed. Aborting.${CLR_RESET}" >&2
+    return 1
+  fi
 
   if [ ! -d "${target_dir}" ]; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Directory '${target_dir}' does not exist.${CLR_RESET}" >&2
@@ -685,7 +740,7 @@ do_review_sandbox() {
 }
 
 do_init_sandbox() {
-  local target_dir="${1:-.}"
+  local target_dir_raw="${1:-.}"
   local template="${2:-default}"
   local auto_gitignore="${3:-prompt}" # prompt, yes, no
   local agy_version="${4:-${AGY_VERSION:-${DEFAULT_AGY_VERSION}}}"
@@ -697,8 +752,12 @@ do_init_sandbox() {
   local shared_config="${10:-${CLI_SHARED_CONFIG:-${DEFAULT_SHARED_CONFIG}}}"
   local shared_cache="${11:-${CLI_SHARED_CACHE:-${DEFAULT_SHARED_CACHE}}}"
 
-  # Expand tilde and relative paths to canonical absolute path
-  target_dir="$(expand_path "${target_dir}")"
+  # Validate target directory against security blacklist (Fix VULN-05)
+  local target_dir=""
+  if ! target_dir="$(validate_target_dir "${target_dir_raw}")"; then
+    echo -e "${CLR_RED}==> [antigravity-sandbox] Target directory validation failed. Aborting.${CLR_RESET}" >&2
+    return 1
+  fi
 
   local extra_mounts=()
 
@@ -1251,7 +1310,10 @@ tui_init_wizard() {
       continue
     fi
 
-    target_dir="$(expand_path "${target_input}")"
+    if ! target_dir="$(validate_target_dir "${target_input}")"; then
+      echo ""
+      continue
+    fi
 
     # Check existence
     if [ -f "${target_dir}" ]; then
@@ -1884,7 +1946,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # If no arguments provided:
   if [ -z "$TARGET_DIR" ]; then
     if [ "$CLI_WORKTREE" = true ] || [ ${#CLI_MOUNTS[@]} -gt 0 ]; then
-      do_init_sandbox "." "default" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"
+      if ! do_init_sandbox "." "default" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"; then
+        exit 1
+      fi
       exit 0
     fi
     if [ -t 0 ] && [ -t 1 ]; then
@@ -1892,12 +1956,16 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       exit 0
     else
       # Non-interactive headless fallback when piped or called in CI without args
-      do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"
+      if ! do_init_sandbox "." "default" "no" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"; then
+        exit 1
+      fi
       exit 0
     fi
   fi
 
   # Positional arguments provided: agy-sandbox <target_dir> [template]
   TEMPLATE="${TEMPLATE:-default}"
-  do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"
+  if ! do_init_sandbox "${TARGET_DIR}" "${TEMPLATE}" "prompt" "${CLI_VERSION}" "${CLI_PATCH}" "${CLI_WORKTREE}" "${CLI_WORKTREE_BRANCH}" "${CLI_PATCHER_COMMIT}" "${DEFAULT_PATCHER_REPO}" "${CLI_SHARED_CONFIG}" "${CLI_SHARED_CACHE}"; then
+    exit 1
+  fi
 fi
