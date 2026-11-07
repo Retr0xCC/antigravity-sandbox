@@ -13,12 +13,12 @@ TARGET_DIR="${TARGET_DIR:-${HOME}/.local/bin}"
 VERSION="${AGY_VERSION:-}"
 AGY_CACHE_DIR="${AGY_CACHE_DIR:-${HOME}/.cache/agy-downloads}"
 
-# Antigravity eligibility patcher (QNIX-Dev) supply chain pinning (SEC-03)
+# Antigravity eligibility patcher (QNIX-Dev) supply chain commit pinning
 PATCHER_REPO="${PATCHER_REPO:-https://github.com/QNIX-Dev/eligibility-antigravity-patcher.git}"
 PATCHER_COMMIT="${PATCHER_COMMIT:-90498f50353d414232f593dffe88899bc80b6312}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-${AGY_SHA256:-}}"
 
-# Official release SHA256 checksums for cryptographic supply chain verification (SEC-03, SEC-04 / VULN-02)
+# Official release SHA256 checksums for cryptographic supply chain verification
 declare -A KNOWN_RELEASE_SHA256=(
   # 1.5.3 official releases
   ["1.5.3_agy_cli_linux_x64.tar.gz"]="1b4850599cce73a17f94ffb422df3bf9531531b77dbddc40c1a435e0c2c16807"
@@ -83,7 +83,7 @@ verify_archive_checksum() {
     # Fail-closed check if SHA256 verification is required (e.g. pinned or explicit)
     if [ "${REQUIRE_SHA256:-false}" = "true" ] || [ "${AGY_PINNED:-true}" = "true" ]; then
       if [ "${version}" != "latest" ]; then
-        echo "Fatal: Cryptographic SHA256 digest could not be verified for pinned version '${version}' (${asset_name}). Fail-closed (OPEN-02)." >&2
+        echo "Fatal: Cryptographic SHA256 digest could not be verified for pinned version '${version}' (${asset_name}). Aborting in fail-closed mode." >&2
         rm -f "${archive_path}" 2>/dev/null || true
         return 1
       fi

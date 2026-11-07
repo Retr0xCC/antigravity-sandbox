@@ -18,7 +18,7 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Fail-Closed check: jq is strictly required for secure JSON manipulation and policy enforcement (VULN-03)
+# Fail-Closed check: jq is strictly required for secure JSON manipulation and policy enforcement
 if ! command -v jq >/dev/null 2>&1; then
   echo -e "\n\033[1;31m==> [antigravity-sandbox] FATAL: 'jq' command is required for secure sandbox generation.\033[0m" >&2
   echo -e "\033[1;31m==> [antigravity-sandbox] Fail-Closed: Aborting to prevent generation of unconstrained sandbox environments.\033[0m" >&2
@@ -89,7 +89,7 @@ DEFAULT_AGY_PATCH="${DEFAULT_AGY_PATCH:-true}"
 
 # 3. Pinning behavior from sandbox.conf:
 # By default, version pinning is enabled for security (PINNED_STABLE_VERSION=1.5.3 with SHA256 verification),
-# even when --no-patch is chosen (clean official binary, OPEN-02).
+# even when --no-patch is chosen (clean official binary).
 DEFAULT_AGY_PINNED="${AGY_PINNED:-true}"
 
 # 4. Resolve default version based on pinning:
@@ -556,9 +556,9 @@ validate_target_dir() {
   canonical_home="$(realpath -m "${HOME:-/home/$(whoami)}" 2>/dev/null || echo "${HOME}")"
 
   # 2. Check if target is inside user HOME hierarchy
-  # Allows subdirectories under user HOME even on Ostree/Silverblue where $HOME is /var/home/... (BUG-02)
+  # Allows subdirectories under user HOME even on Ostree/Silverblue where $HOME is /var/home/...
   if [ -n "${canonical_home}" ] && ([ "${canonical_target}" = "${canonical_home}" ] || [[ "${canonical_target}" == "${canonical_home}/"* ]]); then
-    # User root HOME directory itself (Fix VULN-05)
+    # User root HOME directory itself
     if [ "${canonical_target}" = "${canonical_home}" ]; then
       echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Cannot initialize sandbox directly in user root HOME directory ('${canonical_home}')!${CLR_RESET}" >&2
       echo -e "    Mounting the entire home directory exposes host secrets (~/.ssh, ~/.gnupg, ~/.bashrc) to the container." >&2
@@ -566,7 +566,7 @@ validate_target_dir() {
       return 1
     fi
 
-    # Check if target is a hidden file or directory in user HOME (Fix NEW-03)
+    # Check if target is a hidden file or directory in user HOME
     if [[ "${canonical_target}" == "${canonical_home}/."* ]]; then
       echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
       return 1
@@ -587,7 +587,7 @@ validate_target_dir() {
     return 0
   fi
 
-  # 3. Check if target is /home, /Users, or an ancestor of user HOME (Fix NEW-03)
+  # 3. Check if target is /home, /Users, or an ancestor of user HOME
   if [ "${canonical_target}" = "/home" ] || [ "${canonical_target}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_target}/"* ]]; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Target directory '${canonical_target}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
     return 1
@@ -639,7 +639,7 @@ validate_and_parse_mount() {
     return 1
   fi
 
-  # Reject commas to prevent option injection attacks (Fix NEW-03)
+  # Reject commas to prevent option injection attacks
   if [[ "${host_raw}" == *","* ]] || [[ "${container_path}" == *","* ]]; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Mount paths cannot contain commas (','): '${spec}'${CLR_RESET}" >&2
     return 1
@@ -658,7 +658,7 @@ validate_and_parse_mount() {
   local canonical_container
   canonical_container="$(realpath -m "${container_path}" 2>/dev/null || echo "${container_path}")"
 
-  # Protect container system and sensitive directories from overwrite (REG-05)
+  # Protect container system and sensitive directories from overwrite
   local protected_container_dirs=(
     "/usr/local/share/agy-sandbox"
     "/usr/local/bin"
@@ -705,14 +705,14 @@ validate_and_parse_mount() {
   canonical_home="$(realpath -m "${HOME:-/home/$(whoami)}" 2>/dev/null || echo "${HOME}")"
 
   # 2. Check if host mount path is inside user HOME hierarchy
-  # Allows subdirectories under user HOME even on Ostree/Silverblue where $HOME is /var/home/... (BUG-02)
+  # Allows subdirectories under user HOME even on Ostree/Silverblue where $HOME is /var/home/...
   if [ -n "${canonical_home}" ] && ([ "${canonical_host}" = "${canonical_home}" ] || [[ "${canonical_host}" == "${canonical_home}/"* ]]); then
     if [ "${canonical_host}" = "${canonical_home}" ]; then
       echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is the entire user HOME directory and is blacklisted for security reasons!${CLR_RESET}" >&2
       return 1
     fi
 
-    # Hidden files or directories under user HOME (Fix NEW-03)
+    # Hidden files or directories under user HOME
     if [[ "${canonical_host}" == "${canonical_home}/."* ]]; then
       echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is a hidden file or directory in user HOME and is blacklisted for security reasons!${CLR_RESET}" >&2
       return 1
@@ -734,7 +734,7 @@ validate_and_parse_mount() {
       return 1
     fi
 
-    # 4. Ancestor directories of user HOME (Fix NEW-03)
+    # 4. Ancestor directories of user HOME
     if [ "${canonical_host}" = "/home" ] || [ "${canonical_host}" = "/Users" ] || [[ "${canonical_home}" == "${canonical_host}/"* ]]; then
       echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Host mount path '${host_raw}' is an ancestor of user HOME ('${canonical_home}') and is blacklisted for security reasons!${CLR_RESET}" >&2
       return 1
@@ -842,7 +842,7 @@ do_init_sandbox() {
   local shared_config="${10:-${CLI_SHARED_CONFIG:-${DEFAULT_SHARED_CONFIG}}}"
   local shared_cache="${11:-${CLI_SHARED_CACHE:-${DEFAULT_SHARED_CACHE}}}"
 
-  # Validate target directory against security blacklist (Fix VULN-05)
+  # Validate target directory against security blacklist
   local target_dir=""
   if ! target_dir="$(validate_target_dir "${target_dir_raw}")"; then
     echo -e "${CLR_RED}==> [antigravity-sandbox] Target directory validation failed. Aborting.${CLR_RESET}" >&2
@@ -863,7 +863,7 @@ do_init_sandbox() {
     done
   fi
 
-  # 2. Process Git repository isolation if requested (FEAT-01 / VULN-01 Fix)
+  # 2. Process Git repository isolation if requested (isolated clone)
   local is_worktree=false
   local worktree_dir=""
   if [ "${use_worktree}" = "true" ]; then
@@ -890,7 +890,7 @@ do_init_sandbox() {
       # Check if this is an old vulnerable git worktree (where .git is a file)
       if [ -f "${worktree_dir}/.git" ]; then
         echo -e "${CLR_YELLOW}==> [antigravity-sandbox] Warning: Detected legacy/vulnerable git worktree at '${worktree_dir}'.${CLR_RESET}"
-        echo -e "    Legacy worktrees share the host's .git and are vulnerable to Host RCE ([VULN-01])."
+        echo -e "    Legacy worktrees share the host's .git and are vulnerable to Host RCE via git hooks or config injection."
         if [ -n "$(git -C "${worktree_dir}" status --porcelain 2>/dev/null)" ]; then
           echo -e "${CLR_RED}==> [antigravity-sandbox] Error: Existing worktree '${worktree_dir}' contains uncommitted changes!${CLR_RESET}" >&2
           echo -e "    Aborting to prevent data loss. Commit, stash, or manually remove '${worktree_dir}' before proceeding." >&2
@@ -925,7 +925,7 @@ do_init_sandbox() {
     is_worktree=true
   fi
 
-  # 3. Add VFS Read-Only Git metadata protection mounts (Defense-in-Depth / VULN-01 & NEW-02 Fix)
+  # 3. Add VFS Read-Only Git metadata protection mounts (Defense-in-Depth)
   # Protects against agent modifying .git/config (core.fsmonitor / core.hooksPath), injecting hooks, or submodules
   if [ -d "${target_dir}/.git" ]; then
     mkdir -p "${target_dir}/.git/hooks" "${target_dir}/.git/info" "${target_dir}/.git/modules"
@@ -950,7 +950,7 @@ do_init_sandbox() {
     )
   fi
 
-  # 4. Protect .vscode/ against Host RCE via tasks.json / settings.json (NEW-02 Fix)
+  # 4. Protect .vscode/ against Host RCE via tasks.json / settings.json
   mkdir -p "${target_dir}/.vscode"
   extra_mounts+=(
     "source=\${localWorkspaceFolder}/.vscode,target=\${containerWorkspaceFolder}/.vscode,type=bind,readonly"
@@ -1486,13 +1486,13 @@ tui_init_wizard() {
     esac
   done
 
-  # Git Worktree Isolation option (FEAT-01)
+  # Git Worktree Isolation option
   local use_worktree="false"
   local worktree_branch="agy-sandbox"
 
   if [ -d "${target_dir}" ] && git -C "${target_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo ""
-    echo -e "${CLR_BOLD}Repository Isolation Mode (FEAT-01 / VULN-01 Fix):${CLR_RESET}"
+    echo -e "${CLR_BOLD}Repository Isolation Mode (Isolated Clone):${CLR_RESET}"
     echo -e "  Target directory is a Git repository. You can isolate the agent"
     echo -e "  inside a standalone clone with full protection of your main repository"
     echo -e "  and read-only .git metadata enforcement."
@@ -1661,7 +1661,7 @@ tui_init_wizard() {
     esac
   done
 
-  # Additional Host Bind Mounts (FEAT-02)
+  # Additional Host Bind Mounts
   echo ""
   echo -e "${CLR_BOLD}Additional Host Bind Mounts (Optional):${CLR_RESET}"
   echo -e "  Mount external host directories into the container (e.g. datasets, shared caches)."

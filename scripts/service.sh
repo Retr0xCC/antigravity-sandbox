@@ -156,7 +156,7 @@ cmd_install() {
   ${SUDO} install -d -o root -g root -m 0755 "${SYSTEM_LIB_DIR}"
   if [ -f "${SCRIPT_DIR}/sandbox.conf" ]; then
     ${SUDO} install -o root -g root -m 0644 "${SCRIPT_DIR}/sandbox.conf" "${SYSTEM_LIB_DIR}/sandbox.conf"
-    # Preserve caller environment overrides into installed sandbox.conf (Fix BUG-03)
+    # Preserve caller environment overrides into installed sandbox.conf
     local cfg_vars=(
       "NETWORK_NAME"
       "BRIDGE_NAME"

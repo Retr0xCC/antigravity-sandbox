@@ -87,7 +87,7 @@ if docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
   if [ "${existing_icc}" != "false" ]; then
     if [ "${containers_count}" = "0" ] || [ -z "${containers_count}" ]; then
       echo "==> [antigravity-sandbox] Notice: Existing network '${NETWORK_NAME}' has enable_icc != false and no active containers."
-      echo "    Recreating '${NETWORK_NAME}' with com.docker.network.bridge.enable_icc=false (REG-05)..."
+      echo "    Recreating '${NETWORK_NAME}' with com.docker.network.bridge.enable_icc=false for inter-container isolation..."
       docker network rm "${NETWORK_NAME}" 2>/dev/null || true
     else
       echo "==> [antigravity-sandbox] Warning: Existing network '${NETWORK_NAME}' has enable_icc != false, but ${containers_count} container(s) are connected."

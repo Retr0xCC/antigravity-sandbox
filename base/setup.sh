@@ -10,7 +10,7 @@ USER_HOME="${HOME:-/home/vscode}"
 MARKER_FILE="${USER_HOME}/.agy_initialized"
 WORKSPACE_DIR="${1:-${CONTAINER_WORKSPACE_FOLDER:-$(pwd)}}"
 
-# Verify permissions on persisted volumes without requiring sudo (no-new-privileges safe, VULN-03)
+# Verify permissions on persisted volumes without requiring sudo (safe under no-new-privileges)
 if [ -d "${USER_HOME}/.gemini" ] && [ ! -w "${USER_HOME}/.gemini" ]; then
     echo "==> [antigravity-sandbox] Warning: ${USER_HOME}/.gemini is not writable by current user."
 fi
@@ -27,7 +27,7 @@ GIT_CONFIG_DIR="${USER_HOME}/.config/git"
 mkdir -p "${GIT_CONFIG_DIR}"
 GIT_XDG_CONFIG="${GIT_CONFIG_DIR}/config"
 
-# Install agy-sync-auth utility for onboarding/syncing tokens to shared volume (Fix NEW-04)
+# Install agy-sync-auth utility for onboarding and syncing tokens to shared volume
 cat << 'EOF_SYNC' > /tmp/agy-sync-auth
 #!/usr/bin/env bash
 set -e
@@ -76,15 +76,15 @@ mkdir -p "${USER_HOME}/.local/bin"
 cp -p /tmp/agy-sync-auth "${USER_HOME}/.local/bin/agy-sync-auth" 2>/dev/null || true
 rm -f /tmp/agy-sync-auth
 
-# Orchestrate configuration migration from .gemini-shared to .gemini (SEC-04 / Fix VULN-02)
+# Orchestrate configuration migration from .gemini-shared to .gemini via Copy-on-Initialize
 mkdir -p "${USER_HOME}/.gemini/antigravity-cli" "${USER_HOME}/.gemini/config"
 
-# Break legacy symlinks for mcp_config.json if present from previous versions (Fix VULN-02)
+# Break legacy symlinks for mcp_config.json if present from previous configurations
 if [ -L "${USER_HOME}/.gemini/config/mcp_config.json" ]; then
     rm -f "${USER_HOME}/.gemini/config/mcp_config.json"
 fi
 
-# Notice: config/mcp_config.json is strictly project-isolated and NEVER shared across sandboxes (Fix VULN-02)!
+# Notice: config/mcp_config.json is strictly project-isolated and NEVER shared across sandboxes!
 SHARED_CONFIG_FILES=(
     "antigravity-cli/installation_id"
     "antigravity-cli/settings.json"
@@ -191,7 +191,7 @@ if [ -n "${AGY_VERSION:-}" ] && [ "${AGY_VERSION}" != "latest" ]; then
             chmod 555 "${agy_bin}" 2>/dev/null || true
         fi
     done
-    # Ensure auto-update is disabled for pinned version across interactive and non-interactive sessions (OPEN-03)
+    # Ensure auto-update is disabled for pinned version across interactive and non-interactive sessions
     for prof in "${USER_HOME}/.profile" "${USER_HOME}/.bashrc"; do
         if [ -f "${prof}" ] && ! grep -q "AGY_CLI_DISABLE_AUTO_UPDATE" "${prof}" 2>/dev/null; then
             sed -i '1s/^/export AGY_CLI_DISABLE_AUTO_UPDATE=true\n/' "${prof}" 2>/dev/null || echo "export AGY_CLI_DISABLE_AUTO_UPDATE=true" >> "${prof}"
@@ -210,7 +210,7 @@ else
     done
 fi
 
-# Safe git directory configuration scoped strictly to target workspace (Fix F11 & FEAT-01)
+# Safe git directory configuration scoped strictly to target workspace and worktree gitdir
 if [ -n "${WORKSPACE_DIR}" ] && [ -d "${WORKSPACE_DIR}" ]; then
     git config --file "${GIT_XDG_CONFIG}" --add safe.directory "${WORKSPACE_DIR}" 2>/dev/null || true
     if [ -f "${WORKSPACE_DIR}/.git" ]; then
@@ -223,7 +223,7 @@ if [ -n "${WORKSPACE_DIR}" ] && [ -d "${WORKSPACE_DIR}" ]; then
     fi
 fi
 
-# Clean up and disarm forwarded host authentication sockets and credentials (Fix F1, VULN-04 & NEW-05)
+# Clean up and disarm forwarded host authentication sockets and credentials
 rm -f /tmp/vscode-git-*.sock \
       /tmp/vscode-ssh-auth-*.sock \
       /tmp/user/*/vscode-git-*.sock \
@@ -237,7 +237,7 @@ rm -rf "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vsc
 
 rm -f "${USER_HOME}/.docker/config.json" 2>/dev/null || true
 
-# Sanitize copied .gitconfig using whitelist (preserves only user.name, user.email, init.defaultBranch; purges credentials & tokens, REG-04)
+# Whitelist-sanitize copied .gitconfig: strips [credential] / [http] subsections while preserving git commit identity
 if [ -f "${USER_HOME}/.gitconfig" ]; then
     GIT_NAME="$(git config --file "${USER_HOME}/.gitconfig" user.name 2>/dev/null || true)"
     GIT_EMAIL="$(git config --file "${USER_HOME}/.gitconfig" user.email 2>/dev/null || true)"

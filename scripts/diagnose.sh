@@ -163,7 +163,7 @@ audit_egress_isolation() {
     fi
   fi
 
-  # In-container shared volume and independent config verification (VULN-02 & NEW-04)
+  # In-container shared volume and independent config verification
   if [ -z "${exec_prefix}" ] && [ -d /home/vscode/.gemini-shared ]; then
     local sh_owner
     sh_owner=$(stat -c "%U:%G" /home/vscode/.gemini-shared 2>/dev/null || echo "unknown")
@@ -171,17 +171,17 @@ audit_egress_isolation() {
       log_pass "Container: /home/vscode/.gemini-shared exists and is owned by vscode:vscode."
     fi
     if grep -q " /home/vscode/\.gemini-shared .*ro[ ,]" /proc/mounts 2>/dev/null; then
-      log_pass "Container: /home/vscode/.gemini-shared is mounted Read-Only (VULN-02)."
+      log_pass "Container: /home/vscode/.gemini-shared is mounted Read-Only (cross-sandbox isolation enforced)."
     fi
     local symlinks_found=false
     for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
       if [ -L "/home/vscode/.gemini/${s_file}" ]; then
         symlinks_found=true
-        log_fail "Container: /home/vscode/.gemini/${s_file} is a symlink (VULN-02 violation)!"
+        log_fail "Container: /home/vscode/.gemini/${s_file} is a symlink (cross-sandbox isolation violation)!"
       fi
     done
     if [ "${symlinks_found}" = "false" ]; then
-      log_pass "Container: .gemini files are independent instances (Copy-on-Initialize, VULN-02)."
+      log_pass "Container: .gemini files are independent instances (Copy-on-Initialize, cross-sandbox isolated)."
     fi
   fi
 
@@ -208,47 +208,47 @@ audit_egress_isolation() {
       fi
     fi
 
-    # Wayland, GPG agent, Docker config, and Git credentials leakage probes (VULN-04 & NEW-05)
+    # Wayland, GPG agent, Docker config, and Git credentials leakage probes
     wayland_leak=$(${exec_prefix} sh -c 'ls -d /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null' || echo "")
     if [ -n "${wayland_leak}" ]; then
       local first_w="${wayland_leak%%$'\n'*}"
       local w_perm
       w_perm=$(${exec_prefix} stat -c "%a" "${first_w}" 2>/dev/null || echo "")
       if [ "${w_perm}" = "0" ] || [ "${w_perm}" = "000" ]; then
-        log_pass "Container: Forwarded Wayland socket is disarmed (mode 000, VULN-04/NEW-05)."
+        log_pass "Container: Forwarded Wayland socket is disarmed (mode 000)."
       else
-        log_warn "Container: Forwarded Wayland socket detected (${first_w}) with permissions ${w_perm}. Set dev.containers.mountWaylandSocket: false in host User settings (VULN-04)."
+        log_warn "Container: Forwarded Wayland socket detected (${first_w}) with permissions ${w_perm}. Set dev.containers.mountWaylandSocket: false in host User settings."
       fi
     else
-      log_pass "Container: No leaked Wayland sockets detected (VULN-04)."
+      log_pass "Container: No leaked Wayland sockets detected."
     fi
 
     gpg_leak=$(${exec_prefix} sh -c 'ls -d /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null' || echo "")
     if [ -n "${gpg_leak}" ]; then
-      log_fail "Container: Leaked GPG agent socket detected (${gpg_leak})! Set dev.containers.forwardGpg: false in host settings (NEW-05)."
+      log_fail "Container: Leaked GPG agent socket detected (${gpg_leak})! Set dev.containers.forwardGpg: false in host settings."
     else
       log_pass "Container: No GPG agent sockets leaked."
     fi
 
     ipc_hook=$(${exec_prefix} sh -c 'echo "${VSCODE_IPC_HOOK_CLI:-}"' 2>/dev/null || echo "")
     if [ -n "${ipc_hook}" ]; then
-      log_fail "Container: VSCODE_IPC_HOOK_CLI is exposed (${ipc_hook})! Host CLI IPC escape possible (REG-04)."
+      log_fail "Container: VSCODE_IPC_HOOK_CLI is exposed (${ipc_hook})! Host CLI IPC escape possible."
     else
-      log_pass "Container: VSCODE_IPC_HOOK_CLI is neutralized (empty), protecting host CLI IPC (REG-04)."
+      log_pass "Container: VSCODE_IPC_HOOK_CLI is neutralized (empty), protecting host CLI IPC."
     fi
 
     if ${exec_prefix} test -f /home/vscode/.docker/config.json 2>/dev/null; then
-      log_fail "Container: Leaked Docker credential file found (/home/vscode/.docker/config.json)! (VULN-04 risk)."
+      log_fail "Container: Leaked Docker credential file found (/home/vscode/.docker/config.json)! (credential leak risk)."
     else
       log_pass "Container: /home/vscode/.docker/config.json is absent (no Docker credentials leaked)."
     fi
 
-    # Check gitconfig sanitization (NEW-05): ensure credentials/tokens stripped
+    # Check gitconfig sanitization: ensure credentials/tokens stripped
     if ${exec_prefix} test -f /home/vscode/.gitconfig 2>/dev/null; then
       if ${exec_prefix} git config --file /home/vscode/.gitconfig --get-regexp "credential|http\.|extraheader" >/dev/null 2>&1; then
-        log_fail "Container: /home/vscode/.gitconfig contains leaked credentials or HTTP authorization headers (NEW-05)!"
+        log_fail "Container: /home/vscode/.gitconfig contains leaked credentials or HTTP authorization headers!"
       else
-        log_pass "Container: /home/vscode/.gitconfig is sanitized (no credentials or tokens leaked, NEW-05)."
+        log_pass "Container: /home/vscode/.gitconfig is sanitized (no credentials or tokens leaked)."
       fi
     else
       log_pass "Container: /home/vscode/.gitconfig is absent."
@@ -345,7 +345,7 @@ else
 
       icc_opt=$(docker network inspect "${NETWORK_NAME}" --format '{{index .Options "com.docker.network.bridge.enable_icc"}}' 2>/dev/null || echo "")
       if [ "${icc_opt}" = "false" ]; then
-        log_pass "Docker network inter-container communication disabled (enable_icc=false, OPEN-01)."
+        log_pass "Docker network inter-container communication disabled (enable_icc=false)."
       else
         log_warn "Docker network inter-container communication enabled (enable_icc=${icc_opt:-true}). Re-run ensure-network.sh to isolate sandboxes."
       fi
@@ -380,20 +380,20 @@ echo -e "${CLR_BOLD}[3/8] Linux Kernel Policy Routing (ip rule)${CLR_RESET}"
 if command -v ip >/dev/null 2>&1; then
   rules_dump=$(${SUDO} ip rule show 2>/dev/null | grep -v "\[detached\]" || ip rule show 2>/dev/null | grep -v "\[detached\]" || echo "")
 
-  # Verify absence of detached rules (OPEN-01)
+  # Verify absence of detached rules
   detached_rules=$(${SUDO} ip rule show 2>/dev/null | grep "\[detached\]" || ip rule show 2>/dev/null | grep "\[detached\]" || echo "")
   if [ -n "${detached_rules}" ]; then
-    log_fail "Kernel RPDB contains detached/stale rules (OPEN-01)!"
+    log_fail "Kernel RPDB contains detached/stale rules!"
   else
     log_pass "Kernel RPDB rules free of detached/stale entries."
   fi
 
-  # Rule pref 95 check: Intra-subnet lookup main should NOT be present (OPEN-01)
+  # Rule pref 95 check: Intra-subnet lookup main should NOT be present
   snet_pattern="(to ${ACTIVE_SUBNET}|to ${ACTIVE_SUBNET%/32})([[:space:]]|$)"
   if echo "${rules_dump}" | grep -E "^95:[[:space:]]+" | grep -F "iif ${ACTIVE_BRIDGE}" | grep -E "${snet_pattern}" | grep -E "lookup (main|254)" >/dev/null 2>&1; then
-    log_warn "Rule prio 95: Intra-subnet lookup main is present on ${ACTIVE_BRIDGE}. Re-run ensure-network.sh to close intra-/16 route leaks (OPEN-01)."
+    log_warn "Rule prio 95: Intra-subnet lookup main is present on ${ACTIVE_BRIDGE}. Re-run ensure-network.sh to close intra-/16 route leaks."
   else
-    log_pass "No intra-subnet routing bypass rules detected (strictly isolated boundary, OPEN-01)."
+    log_pass "No intra-subnet routing bypass rules detected (strictly isolated boundary)."
   fi
 
   # Rules pref 100: Outbound unreachable for blocked ranges
@@ -442,15 +442,15 @@ if command -v iptables >/dev/null 2>&1; then
       log_fail "DOCKER-USER chain: Missing jump to AGY-SANDBOX-FWD for ${ACTIVE_BRIDGE}."
     fi
   else
-    log_fail "DOCKER-USER chain not found in iptables filter table (OPEN-01/OPEN-04)."
+    log_fail "DOCKER-USER chain not found in iptables filter table."
   fi
 
   # 4b: Dedicated AGY-SANDBOX-FWD chain
   if ${SUDO} iptables -L AGY-SANDBOX-FWD -n >/dev/null 2>&1; then
     if ${SUDO} iptables -C AGY-SANDBOX-FWD -d "${ACTIVE_SUBNET}" -j RETURN >/dev/null 2>&1; then
-      log_warn "AGY-SANDBOX-FWD chain: Intra-subnet RETURN rule present for ${ACTIVE_SUBNET}. Re-run ensure-network.sh to close intra-/16 route leaks (OPEN-01)."
+      log_warn "AGY-SANDBOX-FWD chain: Intra-subnet RETURN rule present for ${ACTIVE_SUBNET}. Re-run ensure-network.sh to close intra-/16 route leaks."
     else
-      log_pass "AGY-SANDBOX-FWD chain: No intra-subnet RETURN bypass rule present (OPEN-01)."
+      log_pass "AGY-SANDBOX-FWD chain: No intra-subnet RETURN bypass rule present."
     fi
 
     local_fwd_drop_ok=true
@@ -588,9 +588,9 @@ fi
 echo ""
 
 # --------------------------------------------------------
-# 6. Supply Chain Pinning & Image Integrity (SEC-03, CNT-03)
+# 6. Supply Chain Pinning & Image Integrity
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[6/8] Supply Chain Pinning & Image Integrity (SEC-03, CNT-03)${CLR_RESET}"
+echo -e "${CLR_BOLD}[6/8] Supply Chain Pinning & Image Integrity${CLR_RESET}"
 
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -644,11 +644,11 @@ if [ -f "${ROOT_DIR}/base/Dockerfile" ]; then
     log_fail "base/Dockerfile: Patcher not pre-cloned at image build time."
   fi
 
-  # 6. Sudo elimination check (VULN-03)
+  # 6. Sudo elimination check
   if grep -E 'apt-get install.*[[:space:]]sudo([[:space:]]|$)' "${ROOT_DIR}/base/Dockerfile" >/dev/null 2>&1; then
     log_fail "base/Dockerfile: sudo package is installed (privilege escalation risk!)."
   elif grep -q "apt-get purge -y sudo" "${ROOT_DIR}/base/Dockerfile" && grep -q "/etc/sudoers" "${ROOT_DIR}/base/Dockerfile"; then
-    log_pass "base/Dockerfile: sudo package purged and /etc/sudoers removed (strictly rootless container, VULN-03)."
+    log_pass "base/Dockerfile: sudo package purged and /etc/sudoers removed (strictly rootless container)."
   else
     log_warn "base/Dockerfile: sudo purge routine not detected."
   fi
@@ -665,9 +665,9 @@ if [ -f "${ROOT_DIR}/base/install-agy.sh" ]; then
   fi
 
   if grep -q "verify_archive_checksum" "${ROOT_DIR}/base/install-agy.sh" && grep -q "KNOWN_RELEASE_SHA256" "${ROOT_DIR}/base/install-agy.sh"; then
-    log_pass "base/install-agy.sh: Cryptographic SHA256 integrity verification enforced for downloads and cache (VULN-02)."
+    log_pass "base/install-agy.sh: Cryptographic SHA256 integrity verification enforced for downloads and cache."
   else
-    log_fail "base/install-agy.sh: Missing SHA256 checksum verification routine for downloaded/cached releases (VULN-02 risk!)."
+    log_fail "base/install-agy.sh: Missing SHA256 checksum verification routine for downloaded/cached releases (supply chain risk!)."
   fi
 fi
 
@@ -704,21 +704,21 @@ if [ -f "${ROOT_DIR}/base/setup.sh" ]; then
     log_warn "base/setup.sh: Forwarded socket cleanup routine missing."
   fi
 
-  # 4. Safe git directory support for worktrees (FEAT-01)
+  # 4. Safe git directory support for worktrees
   if grep -q "gitdir" "${ROOT_DIR}/base/setup.sh"; then
-    log_pass "base/setup.sh: Git worktree safe.directory registration logic present (FEAT-01)."
+    log_pass "base/setup.sh: Git worktree safe.directory registration logic present."
   else
     log_fail "base/setup.sh: Missing worktree gitdir resolution in safe.directory setup."
   fi
 
-  # 5. MCP configuration isolation (VULN-02)
+  # 5. MCP configuration isolation
   if grep -E 'SHARED_CONFIG_FILES=.*mcp_config\.json' "${ROOT_DIR}/base/setup.sh" >/dev/null 2>&1; then
-    log_fail "base/setup.sh: mcp_config.json found in SHARED_CONFIG_FILES (Cross-Sandbox RCE risk via MCP injection, VULN-02!)."
+    log_fail "base/setup.sh: mcp_config.json found in SHARED_CONFIG_FILES (Cross-Sandbox RCE risk via MCP injection!)."
   else
-    log_pass "base/setup.sh: mcp_config.json is excluded from shared configuration volume (project-isolated, VULN-02)."
+    log_pass "base/setup.sh: mcp_config.json is excluded from shared configuration volume (project-isolated)."
   fi
 
-  # 6. Copy-on-Initialize for shared auth files (VULN-02)
+  # 6. Copy-on-Initialize for shared auth files
   if grep -q "cp -p \"\${shared_path}\"" "${ROOT_DIR}/base/setup.sh"; then
     log_pass "base/setup.sh: Copy-on-Initialize pattern used for shared auth files (safe read-only mount compatibility)."
   else
@@ -728,25 +728,25 @@ fi
 echo ""
 
 # --------------------------------------------------------
-# 7. Dev Container Specification & Runtime Hardening (F1, F2, F8, F14, F15, F17)
+# 7. Dev Container Specification & Runtime Hardening
 # --------------------------------------------------------
-echo -e "${CLR_BOLD}[7/8] Dev Container Specification & Runtime Hardening (F1, F2, F8, F14, F15, F17)${CLR_RESET}"
+echo -e "${CLR_BOLD}[7/8] Dev Container Specification & Runtime Hardening${CLR_RESET}"
 
 DEV_JSON="${ROOT_DIR}/base/devcontainer.json"
 if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
-  # 1. Credential & secret leak prevention and port auto-forward blocking (F1, VULN-04)
+  # 1. Credential & secret leak prevention and port auto-forward blocking
   if jq -e '.customizations.vscode.settings["dev.containers.copyGitConfig"] == false and
             .customizations.vscode.settings["dev.containers.dockerCredentialHelper"] == false and
             .customizations.vscode.settings["dev.containers.mountWaylandSocket"] == false and
             .customizations.vscode.settings["git.terminalAuthentication"] == false and
             .customizations.vscode.settings["github.gitAuthentication"] == false and
             .customizations.vscode.settings["remote.autoForwardPorts"] == false' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: All 6 isolation, credential blocking, and auto-forward prevention flags active in vscode settings (F1, VULN-04)."
+    log_pass "base/devcontainer.json: All 6 isolation, credential blocking, and auto-forward prevention flags active in vscode settings."
   else
     log_fail "base/devcontainer.json: Missing one or more credential or auto-forward blocking flags in customizations.vscode.settings (copyGitConfig, dockerCredentialHelper, mountWaylandSocket, remote.autoForwardPorts)."
   fi
 
-  # 2. remoteEnv channel neutralization and tool cache directories (F1, VULN-04)
+  # 2. remoteEnv channel neutralization and tool cache directories
   if jq -e '.remoteEnv.SSH_AUTH_SOCK == "" and
             .remoteEnv.VSCODE_GIT_IPC_HANDLE == "" and
             .remoteEnv.VSCODE_GIT_ASKPASS_NODE == "" and
@@ -755,9 +755,9 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
             .remoteEnv.SSH_ASKPASS == "/bin/false" and
             .remoteEnv.WAYLAND_DISPLAY == "" and
             .remoteEnv.VSCODE_IPC_HOOK_CLI == ""' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: Host IPC, Askpass, Wayland, and CLI Hook channels neutralized in remoteEnv (F1, VULN-04)."
+    log_pass "base/devcontainer.json: Host IPC, Askpass, Wayland, and CLI Hook channels neutralized in remoteEnv."
   else
-    log_fail "base/devcontainer.json: remoteEnv missing IPC/Askpass/Wayland/CLI neutralization variables (VULN-04 risk!)."
+    log_fail "base/devcontainer.json: remoteEnv missing IPC/Askpass/Wayland/CLI neutralization variables (credential leak risk!)."
   fi
 
   if jq -e '.remoteEnv.UV_CACHE_DIR == "/home/vscode/.cache/uv" and
@@ -775,15 +775,15 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_fail "base/devcontainer.json: build.args.PATCHER_COMMIT is not pinned to a 40-character SHA."
   fi
 
-  # 3. Fail-Closed initializeCommand (F2)
+  # 3. Fail-Closed initializeCommand
   init_cmd=$(jq -r '.initializeCommand // empty' "${DEV_JSON}")
   if [[ "${init_cmd}" =~ /run/agy-sandbox/network.ready ]] && [[ "${init_cmd}" =~ ip[[:space:]]+rule ]]; then
-    log_pass "base/devcontainer.json: Fail-Closed initializeCommand validates readiness marker and RPDB rules (F2)."
+    log_pass "base/devcontainer.json: Fail-Closed initializeCommand validates readiness marker and RPDB rules."
   else
-    log_fail "base/devcontainer.json: Missing or incomplete Fail-Closed initializeCommand (F2 risk!)."
+    log_fail "base/devcontainer.json: Missing or incomplete Fail-Closed initializeCommand (unisolated network start risk!)."
   fi
 
-  # 4. runArgs security flags & limits (CNT-01, NET-05, F8, F15)
+  # 4. runArgs security flags & limits
   run_args=$(jq -r '.runArgs[]?' "${DEV_JSON}")
   args_ok=true
   for req in "--security-opt=no-new-privileges:true" \
@@ -820,12 +820,12 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: All runArgs security constraints present (no-new-privileges, cap-drop, limits from sandbox.conf, dual DNS, tmpfs)."
   fi
 
-  # 5. mounts shared config, project isolation & readonly .devcontainer (CNT-02, F14, F17, VULN-02)
+  # 5. mounts shared config, project isolation & readonly .devcontainer
   mounts_str=$(jq -r '.mounts[]?' "${DEV_JSON}")
   if echo "${mounts_str}" | grep -E "source=agy-shared-config,target=/home/vscode/\.gemini-shared.*readonly" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: Shared global configuration volume mounted read-only (agy-shared-config, readonly, VULN-02)."
+    log_pass "base/devcontainer.json: Shared global configuration volume mounted read-only (agy-shared-config, readonly, cross-sandbox isolated)."
   elif echo "${mounts_str}" | grep -E "source=agy-shared-config,target=/home/vscode/\.gemini-shared" >/dev/null 2>&1; then
-    log_warn "base/devcontainer.json: Shared global configuration volume is mounted read-write (recommended: readonly for VULN-02 mitigation)."
+    log_warn "base/devcontainer.json: Shared global configuration volume is mounted read-write (recommended: readonly for cross-sandbox isolation)."
   else
     log_fail "base/devcontainer.json: Missing shared configuration volume in mounts (agy-shared-config)."
   fi
@@ -837,31 +837,31 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
   fi
 
   if echo "${mounts_str}" | grep -E "source=agy-gemini-data-\\\$\{localWorkspaceFolderBasename\}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: Project-isolated state volume configured (agy-gemini-data-\${localWorkspaceFolderBasename}, F14)."
+    log_pass "base/devcontainer.json: Project-isolated state volume configured (agy-gemini-data-\${localWorkspaceFolderBasename})."
   else
-    log_fail "base/devcontainer.json: Missing project-scoped state volume in mounts (F14)."
+    log_fail "base/devcontainer.json: Missing project-scoped state volume in mounts."
   fi
 
   if echo "${mounts_str}" | grep -E "\.devcontainer.*readonly" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: .devcontainer mounted as Read-Only to prevent in-container host breakout (F17)."
+    log_pass "base/devcontainer.json: .devcontainer mounted as Read-Only to prevent in-container host breakout."
   else
-    log_fail "base/devcontainer.json: Missing readonly bind mount for .devcontainer (F17 risk!)."
+    log_fail "base/devcontainer.json: Missing readonly bind mount for .devcontainer (container escape risk on rebuild!)."
   fi
 
-  # 6. postStartCommand & postAttachCommand socket and credentials cleanup (VULN-04)
+  # 6. postStartCommand & postAttachCommand socket and credentials cleanup
   if jq -e '.postStartCommand | (contains("vscode-git-*.sock") and contains("vscode-ssh-auth-*.sock") and contains("vscode-wayland-*.sock") and contains(".docker/config.json"))' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: postStartCommand cleans forwarded Git, SSH, Wayland sockets, and Docker config on startup (VULN-04)."
+    log_pass "base/devcontainer.json: postStartCommand cleans forwarded Git, SSH, Wayland sockets, and Docker config on startup."
   else
-    log_fail "base/devcontainer.json: postStartCommand socket/credential cleanup routine incomplete (VULN-04 risk!)."
+    log_fail "base/devcontainer.json: postStartCommand socket/credential cleanup routine incomplete (credential leak risk!)."
   fi
 
   if jq -e '.postAttachCommand | (contains("vscode-git-*.sock") and contains("vscode-ssh-auth-*.sock") and contains("vscode-wayland-*.sock") and contains(".docker/config.json"))' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: postAttachCommand cleans forwarded sockets upon window reload and reconnection (VULN-04)."
+    log_pass "base/devcontainer.json: postAttachCommand cleans forwarded sockets upon window reload and reconnection."
   else
-    log_fail "base/devcontainer.json: Missing postAttachCommand cleanup routine (window reload race condition, VULN-04 risk!)."
+    log_fail "base/devcontainer.json: Missing postAttachCommand cleanup routine (window reload race condition risk!)."
   fi
 
-  # 7. init-sandbox.sh worktree, clone isolation, and mount flags support (FEAT-01, FEAT-02, VULN-01)
+  # 7. init-sandbox.sh worktree, clone isolation, and mount flags support
   if [ -f "${ROOT_DIR}/scripts/init-sandbox.sh" ]; then
     if grep -q -- "--worktree" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q -- "--mount" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
       log_pass "scripts/init-sandbox.sh: CLI supports isolated Git clone (--worktree, --isolate) and custom bind mounts (--mount)."
@@ -869,92 +869,92 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       log_fail "scripts/init-sandbox.sh: Missing --worktree or --mount flag support."
     fi
 
-    # VULN-01 verification: ensure main_git_dir is never mounted directly into the container
+    # Ensure main_git_dir is never mounted directly into the container
     if grep -E 'extra_mounts\+\=\(.*source=\$\{main_git_dir\}' "${ROOT_DIR}/scripts/init-sandbox.sh" >/dev/null 2>&1; then
-      log_fail "scripts/init-sandbox.sh: Detected direct mount of host main_git_dir (VULN-01 risk!)."
+      log_fail "scripts/init-sandbox.sh: Detected direct mount of host main_git_dir (host repository corruption risk!)."
     else
-      log_pass "scripts/init-sandbox.sh: Host main_git_dir is never mounted directly into container (VULN-01 mitigated)."
+      log_pass "scripts/init-sandbox.sh: Host main_git_dir is never mounted directly into container (host git repository isolated)."
     fi
 
-    # VULN-02 verification: project state volume path hashing
+    # Project state volume path hashing
     if grep -q "path_hash" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q "agy-gemini-data-" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Project state volume incorporates unique path hash to prevent volume collisions (VULN-02)."
+      log_pass "scripts/init-sandbox.sh: Project state volume incorporates unique path hash to prevent volume collisions."
     else
       log_fail "scripts/init-sandbox.sh: Path hashing for project volume isolation not found."
     fi
 
-    # VULN-03 verification: Fail-Closed jq dependency verification
+    # Fail-Closed jq dependency verification
     if grep -q "command -v jq" "${ROOT_DIR}/scripts/init-sandbox.sh" && grep -q "FATAL: 'jq'" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Fail-Closed jq dependency verification enforced at startup (VULN-03)."
+      log_pass "scripts/init-sandbox.sh: Fail-Closed jq dependency verification enforced at startup."
     else
-      log_fail "scripts/init-sandbox.sh: Missing Fail-Closed jq dependency verification (VULN-03 risk!)."
+      log_fail "scripts/init-sandbox.sh: Missing Fail-Closed jq dependency verification (unconstrained generation risk!)."
     fi
 
-    # VULN-03 verification: Full Custom Mode hardening and Dockerfile-only support
+    # Full Custom Mode hardening and Dockerfile-only support
     if grep -q "Custom template lacks devcontainer.json" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Dockerfile-only custom templates automatically receive secured devcontainer.json (VULN-03)."
+      log_pass "scripts/init-sandbox.sh: Dockerfile-only custom templates automatically receive secured devcontainer.json."
     else
-      log_fail "scripts/init-sandbox.sh: Dockerfile-only custom templates do not receive secured devcontainer.json (VULN-03 risk!)."
+      log_fail "scripts/init-sandbox.sh: Dockerfile-only custom templates do not receive secured devcontainer.json (privilege escalation risk!)."
     fi
 
     if grep -q "custom_filter=" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q -- "--security-opt=no-new-privileges:true" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q -- "target=\${containerWorkspaceFolder}/.devcontainer,type=bind,readonly" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Full Custom Mode enforces no-new-privileges, readonly .devcontainer, and Fail-Closed initializeCommand (VULN-03)."
+      log_pass "scripts/init-sandbox.sh: Full Custom Mode enforces no-new-privileges, readonly .devcontainer, and Fail-Closed initializeCommand."
     else
-      log_fail "scripts/init-sandbox.sh: Full Custom Mode lacks complete security filter enforcement (VULN-03 risk!)."
+      log_fail "scripts/init-sandbox.sh: Full Custom Mode lacks complete security filter enforcement (privilege escalation risk!)."
     fi
 
-    # VULN-04 verification: postAttachCommand and remote.autoForwardPorts in init-sandbox.sh
+    # PostAttachCommand and remote.autoForwardPorts in init-sandbox.sh
     if grep -q "postAttachCommand" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q "remote.autoForwardPorts" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Enforces postAttachCommand cleanup and remote.autoForwardPorts: false in all modes (VULN-04)."
+      log_pass "scripts/init-sandbox.sh: Enforces postAttachCommand cleanup and remote.autoForwardPorts: false in all modes."
     else
-      log_fail "scripts/init-sandbox.sh: Missing postAttachCommand or remote.autoForwardPorts enforcement (VULN-04 risk!)."
+      log_fail "scripts/init-sandbox.sh: Missing postAttachCommand or remote.autoForwardPorts enforcement (credential leak / port exposure risk!)."
     fi
 
-    # VULN-05 & NEW-03 verification: target directory security blacklist validation
+    # Target directory security blacklist validation
     if grep -q "validate_target_dir" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q "Cannot initialize sandbox directly in user root HOME directory" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Target directory blacklist validation enforced (validate_target_dir, VULN-05)."
+      log_pass "scripts/init-sandbox.sh: Target directory blacklist validation enforced (validate_target_dir)."
     else
-      log_fail "scripts/init-sandbox.sh: Missing target directory blacklist validation (VULN-05 risk!)."
+      log_fail "scripts/init-sandbox.sh: Missing target directory blacklist validation (host filesystem exposure risk!)."
     fi
 
     if grep -q "is an ancestor of user HOME" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q "is a hidden file or directory in user HOME" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Target directory blacklist blocks /home ancestors and user dotfiles (NEW-03)."
+      log_pass "scripts/init-sandbox.sh: Target directory blacklist blocks /home ancestors and user dotfiles."
     else
-      log_fail "scripts/init-sandbox.sh: Target directory blacklist missing ancestor or dotfile checks (NEW-03 risk!)."
+      log_fail "scripts/init-sandbox.sh: Target directory blacklist missing ancestor or dotfile checks (host filesystem exposure risk!)."
     fi
 
     if grep -A 20 "do_init_sandbox()" "${ROOT_DIR}/scripts/init-sandbox.sh" | grep -q "validate_target_dir"; then
-      log_pass "scripts/init-sandbox.sh: do_init_sandbox verifies target_dir against host blacklist (VULN-05)."
+      log_pass "scripts/init-sandbox.sh: do_init_sandbox verifies target_dir against host blacklist."
     else
-      log_fail "scripts/init-sandbox.sh: do_init_sandbox does not validate target_dir (VULN-05 risk!)."
+      log_fail "scripts/init-sandbox.sh: do_init_sandbox does not validate target_dir (host filesystem exposure risk!)."
     fi
 
-    # NEW-02 verification: read-only .vscode and .git/modules in sandbox
+    # Read-only .vscode and .git/modules in sandbox
     if grep -F -q 'target=\${containerWorkspaceFolder}/.vscode,type=bind,readonly' "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -F -q 'target=\${containerWorkspaceFolder}/.git/modules,type=bind,readonly' "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: .vscode and .git/modules mounted as Read-Only to prevent Host RCE (NEW-02)."
+      log_pass "scripts/init-sandbox.sh: .vscode and .git/modules mounted as Read-Only to prevent Host RCE."
     else
-      log_fail "scripts/init-sandbox.sh: Missing read-only protection for .vscode or .git/modules (NEW-02 risk!)."
+      log_fail "scripts/init-sandbox.sh: Missing read-only protection for .vscode or .git/modules (Host RCE risk!)."
     fi
 
-    # NEW-02 verification: branch format checking
+    # Branch format checking
     if grep -q "git check-ref-format --branch" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Git branch names validated with git check-ref-format (NEW-02)."
+      log_pass "scripts/init-sandbox.sh: Git branch names validated with git check-ref-format."
     else
-      log_fail "scripts/init-sandbox.sh: Missing branch name format validation (NEW-02 risk!)."
+      log_fail "scripts/init-sandbox.sh: Missing branch name format validation (option injection risk!)."
     fi
 
-    # OPEN-03 verification: Full Custom Mode privileged/capAdd stripping
+    # Full Custom Mode privileged/capAdd stripping
     if grep -q "del(.privileged)" "${ROOT_DIR}/scripts/init-sandbox.sh" && \
        grep -q "del(.capAdd)" "${ROOT_DIR}/scripts/init-sandbox.sh"; then
-      log_pass "scripts/init-sandbox.sh: Full Custom Mode strips privileged and capAdd from custom configurations (OPEN-03)."
+      log_pass "scripts/init-sandbox.sh: Full Custom Mode strips privileged and capAdd from custom configurations."
     else
-      log_fail "scripts/init-sandbox.sh: Full Custom Mode does not strip privileged/capAdd (OPEN-03 risk!)."
+      log_fail "scripts/init-sandbox.sh: Full Custom Mode does not strip privileged/capAdd (privilege escalation risk!)."
     fi
 
     # Review command support
@@ -965,7 +965,7 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     fi
   fi
 
-  # 8. Host IDE User Settings Audit (VULN-04 Scope Check)
+  # 8. Host IDE User Settings Audit
   host_ide_settings_paths=(
     "${HOME}/.config/Code/User/settings.json"
     "${HOME}/.config/Code - Insiders/User/settings.json"
@@ -1019,11 +1019,11 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       c_name=$(docker ps --filter "id=${active_cid}" --format '{{.Names}}' 2>/dev/null || echo "${active_cid:0:12}")
       log_info "Auditing active container on '${NETWORK_NAME}': ${c_name} (${active_cid:0:12})"
 
-      # Verify sudo binary is absent in live container (strictly rootless, VULN-03)
+      # Verify sudo binary is absent in live container (strictly rootless)
       if docker exec "${active_cid}" which sudo >/dev/null 2>&1; then
-        log_fail "Container (${c_name}): sudo binary exists in container (privilege escalation risk, VULN-03!)."
+        log_fail "Container (${c_name}): sudo binary exists in container (privilege escalation risk!)."
       else
-        log_pass "Container (${c_name}): sudo binary is absent (strictly rootless unprivileged container, VULN-03)."
+        log_pass "Container (${c_name}): sudo binary is absent (strictly rootless unprivileged container)."
       fi
 
       # Verify protected system paths inside live container
@@ -1054,24 +1054,24 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
           log_fail "Container (${c_name}): /home/vscode/.gemini-shared owned by '${sh_owner}' (expected vscode:vscode)."
         fi
 
-        # Verify shared configuration independent instances (Copy-on-Initialize, VULN-02 & NEW-04)
+        # Verify shared configuration independent instances (Copy-on-Initialize)
         local symlinks_found=false
         for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
           if docker exec "${active_cid}" test -L "/home/vscode/.gemini/${s_file}" 2>/dev/null; then
             symlinks_found=true
-            log_fail "Container (${c_name}): /home/vscode/.gemini/${s_file} is a symlink (VULN-02 violation)!"
+            log_fail "Container (${c_name}): /home/vscode/.gemini/${s_file} is a symlink (cross-sandbox isolation violation)!"
           fi
         done
         if [ "${symlinks_found}" = "false" ]; then
-          log_pass "Container (${c_name}): .gemini configuration files are independent instances (Copy-on-Initialize, VULN-02)."
+          log_pass "Container (${c_name}): .gemini configuration files are independent instances (Copy-on-Initialize)."
         fi
 
-        # Verify mcp_config.json is NOT symlinked to .gemini-shared (VULN-02)
+        # Verify mcp_config.json is NOT symlinked to .gemini-shared
         mcp_link=$(docker exec "${active_cid}" readlink "/home/vscode/.gemini/config/mcp_config.json" 2>/dev/null || echo "")
         if [[ "${mcp_link}" =~ /home/vscode/\.gemini-shared ]]; then
-          log_fail "Container (${c_name}): /home/vscode/.gemini/config/mcp_config.json is linked to shared volume! (Cross-Sandbox RCE risk, VULN-02)."
+          log_fail "Container (${c_name}): /home/vscode/.gemini/config/mcp_config.json is linked to shared volume! (Cross-Sandbox RCE risk)."
         else
-          log_pass "Container (${c_name}): config/mcp_config.json is isolated from shared volume (VULN-02)."
+          log_pass "Container (${c_name}): config/mcp_config.json is isolated from shared volume."
         fi
       else
         log_warn "Container (${c_name}): /home/vscode/.gemini-shared directory missing."
@@ -1114,13 +1114,13 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         if echo "${c_inspect}" | jq -e '.[0].HostConfig.SecurityOpt // [] | any(test("^no-new-privileges(:true|=true)?$"))' >/dev/null 2>&1; then
           log_pass "Container (${c_name}): HostConfig.SecurityOpt contains 'no-new-privileges:true'."
         else
-          log_fail "Container (${c_name}): HostConfig.SecurityOpt missing 'no-new-privileges:true' (OPEN-04)."
+          log_fail "Container (${c_name}): HostConfig.SecurityOpt missing 'no-new-privileges:true'."
         fi
 
         if echo "${c_inspect}" | jq -e '.[0].HostConfig.CapDrop // [] | any(ascii_upcase | test("^(CAP_)?(NET_RAW|ALL)$"))' >/dev/null 2>&1; then
           log_pass "Container (${c_name}): HostConfig.CapDrop drops NET_RAW."
         else
-          log_fail "Container (${c_name}): HostConfig.CapDrop does not contain NET_RAW (OPEN-04)."
+          log_fail "Container (${c_name}): HostConfig.CapDrop does not contain NET_RAW."
         fi
 
         # Direct kernel capability inspection (/proc/1/status CapBnd)
@@ -1129,7 +1129,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
           if [ $(( (0x${live_capbnd} >> 13) & 1 )) -eq 0 ]; then
             log_pass "Container (${c_name}): Kernel bounding set (CapBnd) confirms CAP_NET_RAW dropped."
           else
-            log_fail "Container (${c_name}): Kernel bounding set (CapBnd) has CAP_NET_RAW enabled (0x${live_capbnd}, OPEN-04)."
+            log_fail "Container (${c_name}): Kernel bounding set (CapBnd) has CAP_NET_RAW enabled (0x${live_capbnd})."
           fi
         fi
 
@@ -1137,14 +1137,14 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         if [ "${pids_lim}" -gt 0 ]; then
           log_pass "Container (${c_name}): HostConfig.PidsLimit enforced (${pids_lim})."
         else
-          log_fail "Container (${c_name}): HostConfig.PidsLimit not enforced (${pids_lim}, OPEN-04)."
+          log_fail "Container (${c_name}): HostConfig.PidsLimit not enforced (${pids_lim})."
         fi
 
         devcont_ro=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | endswith("/.devcontainer")) | .RW' 2>/dev/null || echo "")
         if [ "${devcont_ro}" = "false" ]; then
           log_pass "Container (${c_name}): .devcontainer mount is strictly Read-Only (RW: false)."
         elif [ "${devcont_ro}" = "true" ]; then
-          log_fail "Container (${c_name}): .devcontainer mount is writable (RW: true, F17 risk!)."
+          log_fail "Container (${c_name}): .devcontainer mount is writable (RW: true — container escape risk on rebuild!)."
         else
           log_info "Container (${c_name}): .devcontainer dedicated mount not detected in container Mounts."
         fi
@@ -1156,18 +1156,18 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
           log_fail "Container (${c_name}): /home/vscode/.cache is NOT mounted."
         fi
 
-        # Stage 4 Git repository metadata mounts protection (FEAT-01, VULN-01)
+        # Stage 4 Git repository metadata mounts protection
         has_git_mount=$(echo "${c_inspect}" | jq -r '.[0].Mounts[]? | select(.Destination | test("/\\.git(/.*)?$")) | .Destination' 2>/dev/null | head -n1 || echo "")
         if [ -n "${has_git_mount}" ]; then
           log_info "Container (${c_name}): Git metadata bind mounts detected. Auditing protections..."
           for sub in "hooks" "config" "info"; do
             sub_rw=$(echo "${c_inspect}" | jq -r --arg s "/.git/${sub}" '.[0].Mounts[]? | select(.Destination | endswith($s)) | .RW' 2>/dev/null || echo "")
             if [ "${sub_rw}" = "false" ]; then
-              log_pass "Container (${c_name}): .git/${sub} mount is strictly Read-Only (RW: false, FEAT-01 / VULN-01)."
+              log_pass "Container (${c_name}): .git/${sub} mount is strictly Read-Only (RW: false)."
             elif [ "${sub_rw}" = "true" ]; then
               log_fail "Container (${c_name}): .git/${sub} mount is WRITABLE (RW: true, host RCE risk!)."
             else
-              log_fail "Container (${c_name}): .git/${sub} dedicated Read-Only mount not detected in container Mounts (OPEN-04)."
+              log_fail "Container (${c_name}): .git/${sub} dedicated Read-Only mount not detected in container Mounts."
             fi
           done
         fi
