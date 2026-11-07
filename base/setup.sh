@@ -171,6 +171,7 @@ fi
 AGY_PATCH="${AGY_PATCH:-}"
 if [ "${AGY_PATCH}" = "true" ] || [ "${AGY_PATCH}" = "1" ] || [ "${AGY_PATCH}" = "yes" ]; then
     echo "==> [antigravity-sandbox] Applying Antigravity CLI patch (QNIX-Dev/eligibility-antigravity-patcher)..."
+    chmod u+w "${USER_HOME}/.local/bin/agy" "/home/vscode/.antigravity/bin/agy" 2>/dev/null || true
     PATCHER_SCRIPT="/usr/local/share/agy-sandbox/patcher/manager.py"
     if [ -f "${PATCHER_SCRIPT}" ]; then
         python3 "${PATCHER_SCRIPT}" patch cli
@@ -234,19 +235,17 @@ rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null |
 chmod 000 "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true
 rm -rf "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true
 
-chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true
-rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true
-
 rm -f "${USER_HOME}/.docker/config.json" 2>/dev/null || true
 
-# Sanitize copied .gitconfig (strip credentials/tokens while preserving user.name & user.email for git commit)
+# Sanitize copied .gitconfig using whitelist (preserves only user.name, user.email, init.defaultBranch; purges credentials & tokens, REG-04)
 if [ -f "${USER_HOME}/.gitconfig" ]; then
-    git config --file "${USER_HOME}/.gitconfig" --remove-section credential 2>/dev/null || true
-    git config --file "${USER_HOME}/.gitconfig" --remove-section http 2>/dev/null || true
-    git config --file "${USER_HOME}/.gitconfig" --remove-section core.sshCommand 2>/dev/null || true
-    git config --file "${USER_HOME}/.gitconfig" --remove-section gpg 2>/dev/null || true
-    git config --file "${USER_HOME}/.gitconfig" --unset-all core.sshCommand 2>/dev/null || true
-    git config --file "${USER_HOME}/.gitconfig" --unset-all core.askPass 2>/dev/null || true
+    GIT_NAME="$(git config --file "${USER_HOME}/.gitconfig" user.name 2>/dev/null || true)"
+    GIT_EMAIL="$(git config --file "${USER_HOME}/.gitconfig" user.email 2>/dev/null || true)"
+    GIT_BRANCH="$(git config --file "${USER_HOME}/.gitconfig" init.defaultBranch 2>/dev/null || true)"
+    rm -f "${USER_HOME}/.gitconfig"
+    [ -n "${GIT_NAME}" ] && git config --file "${USER_HOME}/.gitconfig" user.name "${GIT_NAME}" 2>/dev/null || true
+    [ -n "${GIT_EMAIL}" ] && git config --file "${USER_HOME}/.gitconfig" user.email "${GIT_EMAIL}" 2>/dev/null || true
+    [ -n "${GIT_BRANCH}" ] && git config --file "${USER_HOME}/.gitconfig" init.defaultBranch "${GIT_BRANCH}" 2>/dev/null || true
 fi
 
 # Mark initialization as complete

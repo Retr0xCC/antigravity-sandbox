@@ -230,18 +230,11 @@ audit_egress_isolation() {
       log_pass "Container: No GPG agent sockets leaked."
     fi
 
-    ipc_leak=$(${exec_prefix} sh -c 'ls -d /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null' || echo "")
-    if [ -n "${ipc_leak}" ]; then
-      local first_ipc="${ipc_leak%%$'\n'*}"
-      local ipc_perm
-      ipc_perm=$(${exec_prefix} stat -c "%a" "${first_ipc}" 2>/dev/null || echo "")
-      if [ "${ipc_perm}" = "0" ] || [ "${ipc_perm}" = "000" ]; then
-        log_pass "Container: VS Code IPC sockets disarmed (mode 000, NEW-05)."
-      else
-        log_warn "Container: Leaked VS Code IPC socket detected (${first_ipc})."
-      fi
+    ipc_hook=$(${exec_prefix} sh -c 'echo "${VSCODE_IPC_HOOK_CLI:-}"' 2>/dev/null || echo "")
+    if [ -n "${ipc_hook}" ]; then
+      log_fail "Container: VSCODE_IPC_HOOK_CLI is exposed (${ipc_hook})! Host CLI IPC escape possible (REG-04)."
     else
-      log_pass "Container: No leaked VS Code IPC sockets."
+      log_pass "Container: VSCODE_IPC_HOOK_CLI is neutralized (empty), protecting host CLI IPC (REG-04)."
     fi
 
     if ${exec_prefix} test -f /home/vscode/.docker/config.json 2>/dev/null; then

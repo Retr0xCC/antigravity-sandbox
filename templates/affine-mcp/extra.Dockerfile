@@ -1,10 +1,13 @@
 # Switch to root to configure NodeSource repository and install global Node packages
 USER root
 
-# Install Node.js 22 LTS from official NodeSource distribution with cryptographic GPG fingerprint verification
+# Install Node.js 22 LTS from official NodeSource distribution with cryptographic GPG fingerprint verification (REG-03)
 RUN mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource.key && \
-    gpg --dry-run --quiet --import --import-options import-show /tmp/nodesource.key 2>&1 | grep -q "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" && \
+    GNUPGHOME="$(mktemp -d)" && \
+    FPR=$(gpg --batch --homedir "${GNUPGHOME}" --show-keys --with-colons /tmp/nodesource.key 2>/dev/null | awk -F: '$1=="fpr" {print $10; exit}') && \
+    rm -rf "${GNUPGHOME}" && \
+    [ "${FPR}" = "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" ] && \
     gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg /tmp/nodesource.key && \
     rm -f /tmp/nodesource.key && \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \

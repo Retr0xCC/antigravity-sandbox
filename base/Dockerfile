@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get purge -y sudo 2>/dev/null || true \
     && rm -rf /etc/sudoers /etc/sudoers.d /usr/bin/sudo /usr/bin/sudoedit /usr/lib/sudo 2>/dev/null || true
 
-# Install uv (astral-sh fast Python package manager) pinned by immutable SHA256 digest
-COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /uvx /bin/
+# Install uv (astral-sh fast Python package manager) pinned by immutable SHA256 digest (REG-01)
+COPY --from=ghcr.io/astral-sh/uv:0.6.6@sha256:031ddbc79275e351a43cbb66f64d8cd314cc78c3878898f4ab4f147b092e8e2d /uv /uvx /usr/local/bin/
 
 # Clone and lock Antigravity CLI patcher (QNIX-Dev) in system directory (SEC-03)
 ARG PATCHER_REPO="https://github.com/QNIX-Dev/eligibility-antigravity-patcher.git"
@@ -44,18 +44,19 @@ RUN mkdir -p /home/vscode/.gemini /home/vscode/.gemini-shared /home/vscode/.cach
     && chmod 0755 /home/vscode/.cache \
     && chmod 0700 /home/vscode/.gemini /home/vscode/.gemini-shared
 
-# Pin specific CLI version and install into /usr/local/bin as root (owned by root:root, mode 0755)
-# In rootless container (sudo purged, no-new-privileges:true), unprivileged agent cannot overwrite /usr/local/bin/agy (OPEN-03)
+# Pin specific CLI version and pre-install into /home/vscode/.local/bin owned by vscode (REG-02)
+# Ensures user-space patcher has write permissions and ~/.local/bin takes precedence in PATH
 ARG AGY_VERSION=1.5.3
 ENV AGY_VERSION=${AGY_VERSION}
-RUN bash /usr/local/share/agy-sandbox/install-agy.sh "${AGY_VERSION}" "/usr/local/bin" \
-    && chown root:root /usr/local/bin/agy \
-    && chmod 0755 /usr/local/bin/agy
+RUN mkdir -p /home/vscode/.local/bin \
+    && bash /usr/local/share/agy-sandbox/install-agy.sh "${AGY_VERSION}" "/home/vscode/.local/bin" \
+    && chown -R vscode:vscode /home/vscode/.local \
+    && chmod 0755 /home/vscode/.local/bin/agy
 
 # Configure unprivileged vscode user
 USER vscode
 ENV HOME=/home/vscode
-ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/home/vscode/.local/bin"
+ENV PATH="/home/vscode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Configure wrapper function and alias for agy with one-time setup marker
 RUN cat <<'EOF' >> /home/vscode/.bash_aliases

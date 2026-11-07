@@ -82,6 +82,21 @@ ACTIVE_BRIDGE="${BRIDGE_NAME}"
 ACTIVE_SUBNET=""
 
 if docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
+  existing_icc=$(docker network inspect "${NETWORK_NAME}" --format '{{index .Options "com.docker.network.bridge.enable_icc"}}' 2>/dev/null || echo "")
+  containers_count=$(docker network inspect "${NETWORK_NAME}" --format '{{len .Containers}}' 2>/dev/null || echo "0")
+  if [ "${existing_icc}" != "false" ]; then
+    if [ "${containers_count}" = "0" ] || [ -z "${containers_count}" ]; then
+      echo "==> [antigravity-sandbox] Notice: Existing network '${NETWORK_NAME}' has enable_icc != false and no active containers."
+      echo "    Recreating '${NETWORK_NAME}' with com.docker.network.bridge.enable_icc=false (REG-05)..."
+      docker network rm "${NETWORK_NAME}" 2>/dev/null || true
+    else
+      echo "==> [antigravity-sandbox] Warning: Existing network '${NETWORK_NAME}' has enable_icc != false, but ${containers_count} container(s) are connected."
+      echo "    Cannot recreate in-use network automatically. Stop running sandboxes and rerun ensure-network.sh to enforce enable_icc=false."
+    fi
+  fi
+fi
+
+if docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
   echo "==> [antigravity-sandbox] Network '${NETWORK_NAME}' already exists."
   ACTIVE_SUBNET=$(docker network inspect "${NETWORK_NAME}" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "")
   bridge_opt=$(docker network inspect "${NETWORK_NAME}" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
@@ -244,40 +259,39 @@ if ! ${SUDO} iptables -C DOCKER-USER -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD >/
   ${SUDO} iptables -I DOCKER-USER 1 -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-FWD
 fi
 
-  # Populate AGY-SANDBOX-IN
-  ${SUDO} iptables -A AGY-SANDBOX-IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  ${SUDO} iptables -A AGY-SANDBOX-IN -j DROP
+# Populate AGY-SANDBOX-IN
+${SUDO} iptables -A AGY-SANDBOX-IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+${SUDO} iptables -A AGY-SANDBOX-IN -j DROP
 
-  # Clean legacy direct INPUT rules
-  for dev in "${ACTIVE_BRIDGE}" "${BRIDGE_NAME}"; do
-    while ${SUDO} iptables -C INPUT -i "${dev}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; do
-      ${SUDO} iptables -D INPUT -i "${dev}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || break
-    done
-    while ${SUDO} iptables -C INPUT -i "${dev}" -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; do
-      ${SUDO} iptables -D INPUT -i "${dev}" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || break
-    done
-    while ${SUDO} iptables -C INPUT -i "${dev}" -p udp --dport 53 -j ACCEPT >/dev/null 2>&1; do
-      ${SUDO} iptables -D INPUT -i "${dev}" -p udp --dport 53 -j ACCEPT 2>/dev/null || break
-    done
-    while ${SUDO} iptables -C INPUT -i "${dev}" -p tcp --dport 53 -j ACCEPT >/dev/null 2>&1; do
-      ${SUDO} iptables -D INPUT -i "${dev}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || break
-    done
-    while ${SUDO} iptables -C INPUT -i "${dev}" -j DROP >/dev/null 2>&1; do
-      ${SUDO} iptables -D INPUT -i "${dev}" -j DROP 2>/dev/null || break
-    done
+# Clean legacy direct INPUT rules
+for dev in "${ACTIVE_BRIDGE}" "${BRIDGE_NAME}"; do
+  while ${SUDO} iptables -C INPUT -i "${dev}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; do
+    ${SUDO} iptables -D INPUT -i "${dev}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || break
   done
+  while ${SUDO} iptables -C INPUT -i "${dev}" -m state --state ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; do
+    ${SUDO} iptables -D INPUT -i "${dev}" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || break
+  done
+  while ${SUDO} iptables -C INPUT -i "${dev}" -p udp --dport 53 -j ACCEPT >/dev/null 2>&1; do
+    ${SUDO} iptables -D INPUT -i "${dev}" -p udp --dport 53 -j ACCEPT 2>/dev/null || break
+  done
+  while ${SUDO} iptables -C INPUT -i "${dev}" -p tcp --dport 53 -j ACCEPT >/dev/null 2>&1; do
+    ${SUDO} iptables -D INPUT -i "${dev}" -p tcp --dport 53 -j ACCEPT 2>/dev/null || break
+  done
+  while ${SUDO} iptables -C INPUT -i "${dev}" -j DROP >/dev/null 2>&1; do
+    ${SUDO} iptables -D INPUT -i "${dev}" -j DROP 2>/dev/null || break
+  done
+done
 
-  # Remove stale jump if bridge changed
-  if [ "${ACTIVE_BRIDGE}" != "${BRIDGE_NAME}" ]; then
-    while ${SUDO} iptables -C INPUT -i "${BRIDGE_NAME}" -j AGY-SANDBOX-IN >/dev/null 2>&1; do
-      ${SUDO} iptables -D INPUT -i "${BRIDGE_NAME}" -j AGY-SANDBOX-IN 2>/dev/null || break
-    done
-  fi
+# Remove stale jump if bridge changed
+if [ "${ACTIVE_BRIDGE}" != "${BRIDGE_NAME}" ]; then
+  while ${SUDO} iptables -C INPUT -i "${BRIDGE_NAME}" -j AGY-SANDBOX-IN >/dev/null 2>&1; do
+    ${SUDO} iptables -D INPUT -i "${BRIDGE_NAME}" -j AGY-SANDBOX-IN 2>/dev/null || break
+  done
+fi
 
-  # Hook AGY-SANDBOX-IN into INPUT
-  if ! ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-IN >/dev/null 2>&1; then
-    ${SUDO} iptables -I INPUT 1 -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-IN
-  fi
+# Hook AGY-SANDBOX-IN into INPUT
+if ! ${SUDO} iptables -C INPUT -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-IN >/dev/null 2>&1; then
+  ${SUDO} iptables -I INPUT 1 -i "${ACTIVE_BRIDGE}" -j AGY-SANDBOX-IN
 fi
 
 # --------------------------------------------------------

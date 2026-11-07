@@ -305,7 +305,7 @@ assemble_devcontainer_json() {
   local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; rules_cnt=\$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif \${br}\" | grep -c \"unreachable\"); if [ \"\$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for \${br} (\$rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
 
   # Enforce security settings with highest precedence over template
-  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then git config --file /home/vscode/.gitconfig --remove-section credential 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section http 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section gpg 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.askPass 2>/dev/null || true; fi"
+  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then _n=\"\$(git config --file /home/vscode/.gitconfig user.name 2>/dev/null || true)\"; _e=\"\$(git config --file /home/vscode/.gitconfig user.email 2>/dev/null || true)\"; _b=\"\$(git config --file /home/vscode/.gitconfig init.defaultBranch 2>/dev/null || true)\"; rm -f /home/vscode/.gitconfig; [ -n \"\$_n\" ] && git config --file /home/vscode/.gitconfig user.name \"\$_n\" 2>/dev/null || true; [ -n \"\$_e\" ] && git config --file /home/vscode/.gitconfig user.email \"\$_e\" 2>/dev/null || true; [ -n \"\$_b\" ] && git config --file /home/vscode/.gitconfig init.defaultBranch \"\$_b\" 2>/dev/null || true; fi"
 
   # shellcheck disable=SC2016
   local jq_filter='
@@ -655,11 +655,34 @@ validate_and_parse_mount() {
     return 1
   fi
 
-  # Protect container system directory from overwrite (Fix NEW-03)
-  if [ "${container_path}" = "/usr/local/share/agy-sandbox" ] || [[ "${container_path}" == "/usr/local/share/agy-sandbox/"* ]]; then
-    echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Container mount path cannot target protected system directory '/usr/local/share/agy-sandbox'.${CLR_RESET}" >&2
-    return 1
-  fi
+  local canonical_container
+  canonical_container="$(realpath -m "${container_path}" 2>/dev/null || echo "${container_path}")"
+
+  # Protect container system and sensitive directories from overwrite (REG-05)
+  local protected_container_dirs=(
+    "/usr/local/share/agy-sandbox"
+    "/usr/local/bin"
+    "/etc"
+    "/home/vscode/.config/git"
+    "/bin"
+    "/sbin"
+    "/usr"
+    "/lib"
+    "/lib64"
+    "/var"
+    "/proc"
+    "/sys"
+    "/dev"
+    "/run"
+    "/root"
+  )
+  for p_dir in "${protected_container_dirs[@]}"; do
+    if [ "${canonical_container}" = "${p_dir}" ] || [[ "${canonical_container}" == "${p_dir}/"* ]]; then
+      echo -e "${CLR_RED}==> [antigravity-sandbox] Security Error: Container mount path '${container_path}' targets protected system directory '${p_dir}'.${CLR_RESET}" >&2
+      return 1
+    fi
+  done
+  container_path="${canonical_container}"
 
   local host_path
   host_path="$(expand_path "${host_raw}")"
@@ -1001,7 +1024,7 @@ do_init_sandbox() {
 
     local ready_path="${READY_FILE}"
     local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; rules_cnt=\$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif \${br}\" | grep -c \"unreachable\"); if [ \"\$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for \${br} (\$rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
-    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; chmod 000 /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /tmp/vscode-ipc-*.sock /tmp/user/*/vscode-ipc-*.sock 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then git config --file /home/vscode/.gitconfig --remove-section credential 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section http 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --remove-section gpg 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.sshCommand 2>/dev/null || true; git config --file /home/vscode/.gitconfig --unset-all core.askPass 2>/dev/null || true; fi"
+    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then _n=\"\$(git config --file /home/vscode/.gitconfig user.name 2>/dev/null || true)\"; _e=\"\$(git config --file /home/vscode/.gitconfig user.email 2>/dev/null || true)\"; _b=\"\$(git config --file /home/vscode/.gitconfig init.defaultBranch 2>/dev/null || true)\"; rm -f /home/vscode/.gitconfig; [ -n \"\$_n\" ] && git config --file /home/vscode/.gitconfig user.name \"\$_n\" 2>/dev/null || true; [ -n \"\$_e\" ] && git config --file /home/vscode/.gitconfig user.email \"\$_e\" 2>/dev/null || true; [ -n \"\$_b\" ] && git config --file /home/vscode/.gitconfig init.defaultBranch \"\$_b\" 2>/dev/null || true; fi"
 
     local tmp_dc
     tmp_dc="$(mktemp)"
