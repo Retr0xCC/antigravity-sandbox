@@ -57,6 +57,20 @@ fi
 [ -n "${_ENV_PATCHER_REPO}" ] && PATCHER_REPO="${_ENV_PATCHER_REPO}"
 [ -n "${_ENV_PATCHER_COMMIT}" ] && PATCHER_COMMIT="${_ENV_PATCHER_COMMIT}"
 
+DO_FIX=false
+for arg in "$@"; do
+  case "${arg}" in
+    --fix)
+      DO_FIX=true
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--fix]"
+      echo "  --fix  Automatically repair host settings and restore corrupted Wayland socket permissions"
+      exit 0
+      ;;
+  esac
+done
+
 ACTIVE_BRIDGE="${BRIDGE_NAME}"
 ACTIVE_SUBNET="${SUBNET}"
 
@@ -213,11 +227,11 @@ audit_egress_isolation() {
     if [ -n "${wayland_leak}" ]; then
       local first_w="${wayland_leak%%$'\n'*}"
       local w_perm
-      w_perm=$(${exec_prefix} stat -c "%a" "${first_w}" 2>/dev/null || echo "")
+      w_perm=$(${exec_prefix} stat -L -c "%a" "${first_w}" 2>/dev/null || ${exec_prefix} stat -c "%a" "${first_w}" 2>/dev/null || echo "")
       if [ "${w_perm}" = "0" ] || [ "${w_perm}" = "000" ]; then
-        log_pass "Container: Forwarded Wayland socket is disarmed (mode 000)."
+        log_fail "Container: Forwarded Wayland socket (${first_w}) has mode 000 (host socket inode is corrupted!). Restore host socket via 'chmod 700 \$XDG_RUNTIME_DIR/wayland*' and set dev.containers.mountWaylandSocket: false in host settings."
       else
-        log_warn "Container: Forwarded Wayland socket detected (${first_w}) with permissions ${w_perm}. Set dev.containers.mountWaylandSocket: false in host User settings."
+        log_warn "Container: Forwarded Wayland socket detected (${first_w}). Set dev.containers.mountWaylandSocket: false in host User settings to prevent host forwarding."
       fi
     else
       log_pass "Container: No leaked Wayland sockets detected."
@@ -738,12 +752,13 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
   if jq -e '.customizations.vscode.settings["dev.containers.copyGitConfig"] == false and
             .customizations.vscode.settings["dev.containers.dockerCredentialHelper"] == false and
             .customizations.vscode.settings["dev.containers.mountWaylandSocket"] == false and
+            .customizations.vscode.settings["dev.containers.forwardGpg"] == false and
             .customizations.vscode.settings["git.terminalAuthentication"] == false and
             .customizations.vscode.settings["github.gitAuthentication"] == false and
             .customizations.vscode.settings["remote.autoForwardPorts"] == false' "${DEV_JSON}" >/dev/null 2>&1; then
-    log_pass "base/devcontainer.json: All 6 isolation, credential blocking, and auto-forward prevention flags active in vscode settings."
+    log_pass "base/devcontainer.json: All 7 isolation, credential blocking, and auto-forward prevention flags active in vscode settings."
   else
-    log_fail "base/devcontainer.json: Missing one or more credential or auto-forward blocking flags in customizations.vscode.settings (copyGitConfig, dockerCredentialHelper, mountWaylandSocket, remote.autoForwardPorts)."
+    log_fail "base/devcontainer.json: Missing one or more credential or auto-forward blocking flags in customizations.vscode.settings (copyGitConfig, dockerCredentialHelper, mountWaylandSocket, forwardGpg, remote.autoForwardPorts)."
   fi
 
   # 2. remoteEnv channel neutralization and tool cache directories
@@ -859,6 +874,12 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
     log_pass "base/devcontainer.json: postAttachCommand cleans forwarded sockets upon window reload and reconnection."
   else
     log_fail "base/devcontainer.json: Missing postAttachCommand cleanup routine (window reload race condition risk!)."
+  fi
+
+  if jq -e '(.postStartCommand | contains("chmod 000")) or (.postAttachCommand | contains("chmod 000"))' "${DEV_JSON}" >/dev/null 2>&1; then
+    log_fail "base/devcontainer.json: postStartCommand/postAttachCommand contains dangerous 'chmod 000' (corrupts host socket inodes via bind mounts!)."
+  else
+    log_pass "base/devcontainer.json: postStartCommand/postAttachCommand free of host-corrupting 'chmod 000' commands."
   fi
 
   # 7. init-sandbox.sh worktree, clone isolation, and mount flags support
@@ -988,19 +1009,53 @@ if [ -f "${DEV_JSON}" ] && command -v jq >/dev/null 2>&1; then
       found_host_settings=true
       h_ok=true
       for req_flag in "dev.containers.copyGitConfig" "dev.containers.dockerCredentialHelper" "dev.containers.mountWaylandSocket" "dev.containers.forwardGpg"; do
-        val=$(jq -r ".[\"${req_flag}\"] // empty" "${h_set}" 2>/dev/null || echo "")
+        val=$(jq -r "if has(\"${req_flag}\") then (.[ \"${req_flag}\" ] | tostring) else \"default-true\" end" "${h_set}" 2>/dev/null || echo "default-true")
         if [ "${val}" != "false" ]; then
-          h_ok=false
-          log_warn "Host IDE settings (${h_set}): '${req_flag}' is not set to false (value: '${val:-default-true}'). Host may forward sockets/credentials before container starts!"
+          if [ "${DO_FIX}" = "true" ]; then
+            tmp_fixed="$(mktemp)"
+            if jq ".[\"${req_flag}\"] = false" "${h_set}" > "${tmp_fixed}" 2>/dev/null; then
+              mv "${tmp_fixed}" "${h_set}"
+              log_pass "Host IDE settings (${h_set}): Configured '${req_flag}': false (--fix applied)."
+            else
+              h_ok=false
+              rm -f "${tmp_fixed}" 2>/dev/null || true
+              log_warn "Host IDE settings (${h_set}): Failed to set '${req_flag}' to false."
+            fi
+          else
+            h_ok=false
+            log_warn "Host IDE settings (${h_set}): '${req_flag}' is not set to false (value: '${val}'). Run '$0 --fix' to configure host IDE isolation flags."
+          fi
         fi
       done
-      if [ "${h_ok}" = "true" ]; then
+      if [ "${h_ok}" = "true" ] && [ "${DO_FIX}" != "true" ]; then
         log_pass "Host IDE settings (${h_set}): All dev.containers.* isolation flags set to false."
       fi
     fi
   done
   if [ "${found_host_settings}" = "false" ]; then
     log_info "Host IDE User settings not found at standard paths. If using VS Code/Cursor on host, set dev.containers.copyGitConfig: false, dev.containers.dockerCredentialHelper: false, dev.containers.mountWaylandSocket: false, and dev.containers.forwardGpg: false in host settings."
+  fi
+
+  # Check host Wayland sockets for mode 000 corruption
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "${XDG_RUNTIME_DIR}" ]; then
+    mapfile -t host_wayland_socks < <(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name "wayland-*" -type s 2>/dev/null || true)
+    for ws in "${host_wayland_socks[@]}"; do
+      [ -z "${ws}" ] && continue
+      ws_perm=$(stat -c "%a" "${ws}" 2>/dev/null || echo "")
+      if [ "${ws_perm}" = "0" ] || [ "${ws_perm}" = "000" ]; then
+        if [ "${DO_FIX}" = "true" ]; then
+          if chmod 700 "${ws}" 2>/dev/null; then
+            log_pass "Host Wayland socket (${ws}): Successfully restored permissions from mode 000 to 0700 (--fix applied)."
+          else
+            log_fail "Host Wayland socket (${ws}): Failed to restore permissions from mode 000. Run 'chmod 700 ${ws}' manually."
+          fi
+        else
+          log_fail "Host Wayland socket (${ws}): Inode has mode 000 (graphical session broken!). Run '$0 --fix' or 'chmod 700 ${ws}' to restore."
+        fi
+      else
+        log_pass "Host Wayland socket (${ws}): Normal permissions (${ws_perm})."
+      fi
+    done
   fi
 else
   log_info "base/devcontainer.json not found or jq unavailable. Skipping static devcontainer audit."
@@ -1055,7 +1110,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         fi
 
         # Verify shared configuration independent instances (Copy-on-Initialize)
-        local symlinks_found=false
+        symlinks_found=false
         for s_file in "antigravity-cli/settings.json" "antigravity-cli/installation_id" "config/mcp_config.json"; do
           if docker exec "${active_cid}" test -L "/home/vscode/.gemini/${s_file}" 2>/dev/null; then
             symlinks_found=true

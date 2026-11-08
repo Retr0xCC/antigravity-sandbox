@@ -223,19 +223,31 @@ if [ -n "${WORKSPACE_DIR}" ] && [ -d "${WORKSPACE_DIR}" ]; then
     fi
 fi
 
-# Clean up and disarm forwarded host authentication sockets and credentials
+# Clean up forwarded host authentication sockets, runtime symlinks, and credentials
+# Note: Never execute 'chmod 000' on forwarded sockets as bind mounts share host inodes!
 rm -f /tmp/vscode-git-*.sock \
       /tmp/vscode-ssh-auth-*.sock \
       /tmp/user/*/vscode-git-*.sock \
-      /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true
+      /tmp/user/*/vscode-ssh-auth-*.sock \
+      /tmp/vscode-wayland-*.sock \
+      /tmp/user/*/vscode-wayland-*.sock \
+      /tmp/user/*/wayland-* 2>/dev/null || true
 
-chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true
-rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true
-
-chmod 000 "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true
 rm -rf "${USER_HOME}/.gnupg"/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true
 
 rm -f "${USER_HOME}/.docker/config.json" 2>/dev/null || true
+
+# Neutralize Wayland display variable to prevent container GUI access
+for prof in "${USER_HOME}/.profile" "${USER_HOME}/.bashrc"; do
+    if [ -f "${prof}" ] && ! grep -q "WAYLAND_DISPLAY" "${prof}" 2>/dev/null; then
+        cat << 'EOF' >> "${prof}"
+
+# Neutralize Wayland display variable to prevent container GUI access
+unset WAYLAND_DISPLAY
+export WAYLAND_DISPLAY=""
+EOF
+    fi
+done
 
 # Whitelist-sanitize copied .gitconfig: strips [credential] / [http] subsections while preserving git commit identity
 if [ -f "${USER_HOME}/.gitconfig" ]; then

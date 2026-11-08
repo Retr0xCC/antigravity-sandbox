@@ -305,7 +305,7 @@ assemble_devcontainer_json() {
   local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; rules_cnt=\$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif \${br}\" | grep -c \"unreachable\"); if [ \"\$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for \${br} (\$rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
 
   # Enforce security settings with highest precedence over template
-  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then _n=\"\$(git config --file /home/vscode/.gitconfig user.name 2>/dev/null || true)\"; _e=\"\$(git config --file /home/vscode/.gitconfig user.email 2>/dev/null || true)\"; _b=\"\$(git config --file /home/vscode/.gitconfig init.defaultBranch 2>/dev/null || true)\"; rm -f /home/vscode/.gitconfig; [ -n \"\$_n\" ] && git config --file /home/vscode/.gitconfig user.name \"\$_n\" 2>/dev/null || true; [ -n \"\$_e\" ] && git config --file /home/vscode/.gitconfig user.email \"\$_e\" 2>/dev/null || true; [ -n \"\$_b\" ] && git config --file /home/vscode/.gitconfig init.defaultBranch \"\$_b\" 2>/dev/null || true; fi"
+  local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock /tmp/user/*/wayland-* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then _n=\"\$(git config --file /home/vscode/.gitconfig user.name 2>/dev/null || true)\"; _e=\"\$(git config --file /home/vscode/.gitconfig user.email 2>/dev/null || true)\"; _b=\"\$(git config --file /home/vscode/.gitconfig init.defaultBranch 2>/dev/null || true)\"; rm -f /home/vscode/.gitconfig; [ -n \"\$_n\" ] && git config --file /home/vscode/.gitconfig user.name \"\$_n\" 2>/dev/null || true; [ -n \"\$_e\" ] && git config --file /home/vscode/.gitconfig user.email \"\$_e\" 2>/dev/null || true; [ -n \"\$_b\" ] && git config --file /home/vscode/.gitconfig init.defaultBranch \"\$_b\" 2>/dev/null || true; fi"
 
   # shellcheck disable=SC2016
   local jq_filter='
@@ -318,6 +318,7 @@ assemble_devcontainer_json() {
         "dev.containers.copyGitConfig": false,
         "dev.containers.dockerCredentialHelper": false,
         "dev.containers.mountWaylandSocket": false,
+        "dev.containers.forwardGpg": false,
         "git.terminalAuthentication": false,
         "github.gitAuthentication": false,
         "git.autofetch": false,
@@ -952,6 +953,29 @@ do_init_sandbox() {
 
   # 4. Protect .vscode/ against Host RCE via tasks.json / settings.json
   mkdir -p "${target_dir}/.vscode"
+  if [ ! -f "${target_dir}/.vscode/settings.json" ]; then
+    cat << 'EOF' > "${target_dir}/.vscode/settings.json"
+{
+  "dev.containers.copyGitConfig": false,
+  "dev.containers.dockerCredentialHelper": false,
+  "dev.containers.mountWaylandSocket": false,
+  "dev.containers.forwardGpg": false
+}
+EOF
+  elif command -v jq >/dev/null 2>&1; then
+    local tmp_vs
+    tmp_vs="$(mktemp)"
+    if jq '. * {
+      "dev.containers.copyGitConfig": false,
+      "dev.containers.dockerCredentialHelper": false,
+      "dev.containers.mountWaylandSocket": false,
+      "dev.containers.forwardGpg": false
+    }' "${target_dir}/.vscode/settings.json" > "${tmp_vs}" 2>/dev/null; then
+      mv "${tmp_vs}" "${target_dir}/.vscode/settings.json"
+    else
+      rm -f "${tmp_vs}" 2>/dev/null || true
+    fi
+  fi
   extra_mounts+=(
     "source=\${localWorkspaceFolder}/.vscode,target=\${containerWorkspaceFolder}/.vscode,type=bind,readonly"
   )
@@ -1024,7 +1048,7 @@ do_init_sandbox() {
 
     local ready_path="${READY_FILE}"
     local init_cmd="bash -c 'ready=\"${ready_path}\"; if [ ! -s \"\$ready\" ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi; br=\$(grep \"^ACTIVE_BRIDGE=\" \"\$ready\" 2>/dev/null | cut -d= -f2); [ -z \"\$br\" ] && br=\"${BRIDGE_NAME}\"; rules_cnt=\$(ip rule show 2>/dev/null | grep -v \"\\[detached\\]\" | grep \"iif \${br}\" | grep -c \"unreachable\"); if [ \"\$rules_cnt\" -lt 12 ]; then echo \"[FAIL-CLOSED] Sandbox network isolation is NOT active! Incomplete RPDB routing rules for \${br} (\$rules_cnt/12+). Run: sudo ./scripts/ensure-network.sh\" >&2; exit 1; fi'"
-    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock 2>/dev/null || true; chmod 000 /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; rm -f /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock 2>/dev/null || true; chmod 000 /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then _n=\"\$(git config --file /home/vscode/.gitconfig user.name 2>/dev/null || true)\"; _e=\"\$(git config --file /home/vscode/.gitconfig user.email 2>/dev/null || true)\"; _b=\"\$(git config --file /home/vscode/.gitconfig init.defaultBranch 2>/dev/null || true)\"; rm -f /home/vscode/.gitconfig; [ -n \"\$_n\" ] && git config --file /home/vscode/.gitconfig user.name \"\$_n\" 2>/dev/null || true; [ -n \"\$_e\" ] && git config --file /home/vscode/.gitconfig user.email \"\$_e\" 2>/dev/null || true; [ -n \"\$_b\" ] && git config --file /home/vscode/.gitconfig init.defaultBranch \"\$_b\" 2>/dev/null || true; fi"
+    local clean_forwarding_cmd="rm -f /tmp/vscode-git-*.sock /tmp/vscode-ssh-auth-*.sock /tmp/user/*/vscode-git-*.sock /tmp/user/*/vscode-ssh-auth-*.sock /tmp/vscode-wayland-*.sock /tmp/user/*/vscode-wayland-*.sock /tmp/user/*/wayland-* 2>/dev/null || true; rm -rf /home/vscode/.gnupg/S.gpg-agent* /tmp/vscode-gpg-agent* /tmp/user/*/vscode-gpg-agent* 2>/dev/null || true; rm -f /home/vscode/.docker/config.json 2>/dev/null || true; if [ -f /home/vscode/.gitconfig ]; then _n=\"\$(git config --file /home/vscode/.gitconfig user.name 2>/dev/null || true)\"; _e=\"\$(git config --file /home/vscode/.gitconfig user.email 2>/dev/null || true)\"; _b=\"\$(git config --file /home/vscode/.gitconfig init.defaultBranch 2>/dev/null || true)\"; rm -f /home/vscode/.gitconfig; [ -n \"\$_n\" ] && git config --file /home/vscode/.gitconfig user.name \"\$_n\" 2>/dev/null || true; [ -n \"\$_e\" ] && git config --file /home/vscode/.gitconfig user.email \"\$_e\" 2>/dev/null || true; [ -n \"\$_b\" ] && git config --file /home/vscode/.gitconfig init.defaultBranch \"\$_b\" 2>/dev/null || true; fi"
 
     local tmp_dc
     tmp_dc="$(mktemp)"
@@ -1038,6 +1062,7 @@ do_init_sandbox() {
           "dev.containers.copyGitConfig": false,
           "dev.containers.dockerCredentialHelper": false,
           "dev.containers.mountWaylandSocket": false,
+          "dev.containers.forwardGpg": false,
           "git.terminalAuthentication": false,
           "github.gitAuthentication": false,
           "git.autofetch": false,
